@@ -1,0 +1,45 @@
+# OS / editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.code-workspace
+
+# Temporary / backup files
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*.swo
+*~
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Dependencies / build artifacts
+node_modules/
+vendor/
+build/
+dist/
+coverage/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# WordPress local files
+wp-config.php
+.htaccess
+
+# PHPUnit / Composer caches
+.phpunit.result.cache
+.phpunit.cache/
+composer.lock
+
+# Development-only artifacts
+*.dev.php
