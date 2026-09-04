@@ -1,0 +1,945 @@
+<?php
+if ( ! defined( 'ABSPATH' ) ) { exit; }
+
+final class FormCourier_Notifications_Pro_Settings {
+    private const OPTION = 'formcourier_notifications_pro_settings';
+    private array $settings = [];
+
+    public function __construct() {
+        $stored = get_option( self::OPTION, [] );
+        $this->settings = wp_parse_args( is_array( $stored ) ? $stored : [], self::defaults() );
+    }
+
+    public static function defaults(): array {
+        return [
+            'enabled'          => '0',
+            'bot_token'        => '',
+            'chat_id'          => '',
+            'destinations'     => [],
+            'default_destination' => '',
+            'form_routes'      => [],
+            'conditional_rules' => [],
+            'providers'        => [ 'contact_form_7', 'wpforms', 'fluent_forms', 'forminator', 'ninja_forms', 'gravity_forms' ],
+            'message_template'          => "🆕 <b>New form submission</b>\n\n<b>Form:</b> {form_name}\n\n{all_fields}",
+            'form_message_templates'    => [],
+            'delete_data_on_uninstall' => '0',
+        ];
+    }
+
+    public function init(): void {
+        add_action( 'admin_menu', [ $this, 'admin_menu' ] );
+        add_action( 'admin_init', [ $this, 'register' ] );
+        add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_admin_assets' ] );
+        add_action( 'admin_post_formcourier_notifications_pro_test', [ $this, 'handle_test' ] );
+        add_action( 'admin_post_formcourier_notifications_pro_clear_logs', [ $this, 'handle_clear_logs' ] );
+        add_action( 'admin_post_formcourier_notifications_pro_retry_log', [ $this, 'handle_retry_log' ] );
+        add_filter( 'plugin_action_links_' . FORMCOURIER_NOTIFICATIONS_PRO_BASENAME, [ $this, 'action_links' ] );
+    }
+
+    public function get( string $key, $default = '' ) {
+        return $this->settings[ $key ] ?? $default;
+    }
+
+    public function get_bot_token(): string {
+        return FormCourier_Notifications_Pro_Encryption::decrypt( (string) $this->get( 'bot_token', '' ) );
+    }
+
+    public function get_destinations(): array {
+        $destinations = $this->get( 'destinations', [] );
+        if ( ! is_array( $destinations ) || empty( $destinations ) ) {
+            $legacy_token = (string) $this->get( 'bot_token', '' );
+            $legacy_chat  = (string) $this->get( 'chat_id', '' );
+            if ( '' !== $legacy_token || '' !== $legacy_chat ) {
+                return [ 'default' => [ 'name' => 'Default', 'bot_token' => $legacy_token, 'chat_id' => $legacy_chat, 'enabled' => '1' ] ];
+            }
+        }
+        return is_array( $destinations ) ? $destinations : [];
+    }
+
+    public function get_destination( string $id ): array {
+        $destinations = $this->get_destinations();
+        return isset( $destinations[ $id ] ) && is_array( $destinations[ $id ] ) ? $destinations[ $id ] : [];
+    }
+
+    public function get_destination_bot_token( string $id ): string {
+        $destination = $this->get_destination( $id );
+        return FormCourier_Notifications_Pro_Encryption::decrypt( (string) ( $destination['bot_token'] ?? '' ) );
+    }
+
+    public function get_default_destination_id(): string {
+        $destinations = $this->get_destinations();
+        $default = sanitize_key( (string) $this->get( 'default_destination', '' ) );
+        if ( $default && isset( $destinations[ $default ] ) && '1' === ( $destinations[ $default ]['enabled'] ?? '1' ) ) {
+            return $default;
+        }
+        foreach ( $destinations as $id => $destination ) {
+            if ( '1' === ( $destination['enabled'] ?? '1' ) ) { return sanitize_key( (string) $id ); }
+        }
+        return '';
+    }
+
+    /** @return array<int,string> */
+    public function get_route_destinations( FormCourier_Notifications_Pro_Submission $submission ): array {
+        $routes = $this->get( 'form_routes', [] );
+        $route_key = sanitize_key( $submission->provider_key ) . ':' . sanitize_key( (string) $submission->form_id );
+        $configured = is_array( $routes ) && array_key_exists( $route_key, $routes ) ? $routes[ $route_key ] : [];
+
+        // Backward compatibility with 1.1.0, where each form stored one destination ID.
+        if ( is_string( $configured ) && '' !== $configured ) {
+            $configured = [ $configured ];
+        }
+
+        $resolved = [];
+        if ( is_array( $configured ) ) {
+            foreach ( $configured as $destination_id ) {
+                $destination_id = sanitize_key( (string) $destination_id );
+                if ( '' === $destination_id || in_array( $destination_id, $resolved, true ) ) {
+                    continue;
+                }
+                $destination = $this->get_destination( $destination_id );
+                if ( ! empty( $destination ) && '1' === ( $destination['enabled'] ?? '1' ) ) {
+                    $resolved[] = $destination_id;
+                }
+            }
+        }
+
+        if ( empty( $resolved ) ) {
+            $default = $this->get_default_destination_id();
+            if ( '' !== $default ) {
+                $resolved[] = $default;
+            }
+        }
+
+        return $resolved;
+    }
+
+    public function get_route_destination( FormCourier_Notifications_Pro_Submission $submission ): string {
+        $destinations = $this->get_route_destinations( $submission );
+        return $destinations[0] ?? '';
+    }
+
+
+    /** @return array<int,array<string,mixed>> */
+    public function get_matching_conditional_rules( FormCourier_Notifications_Pro_Submission $submission ): array {
+        $rules = $this->get( 'conditional_rules', [] );
+        if ( ! is_array( $rules ) || empty( $rules ) ) { return []; }
+
+        $route_key = sanitize_key( $submission->provider_key ) . ':' . sanitize_key( (string) $submission->form_id );
+        $matched = [];
+        foreach ( $rules as $rule ) {
+            if ( ! is_array( $rule ) || '1' !== ( $rule['enabled'] ?? '1' ) ) { continue; }
+            if ( $route_key !== (string) ( $rule['form_key'] ?? '' ) ) { continue; }
+            if ( $this->conditional_rule_matches( $rule, $submission ) ) { $matched[] = $rule; }
+        }
+        return $matched;
+    }
+
+    private function conditional_rule_matches( array $rule, FormCourier_Notifications_Pro_Submission $submission ): bool {
+        $field = trim( (string) ( $rule['field'] ?? '' ) );
+        $operator = sanitize_key( (string) ( $rule['operator'] ?? 'equals' ) );
+        $expected = (string) ( $rule['value'] ?? '' );
+        $actual = '';
+
+        if ( '' !== $field ) {
+            $aliases = is_array( $submission->field_aliases ) ? $submission->field_aliases : [];
+            $fields  = is_array( $submission->fields ) ? $submission->fields : [];
+            if ( array_key_exists( $field, $aliases ) ) { $actual = (string) $aliases[ $field ]; }
+            elseif ( array_key_exists( $field, $fields ) ) { $actual = (string) $fields[ $field ]; }
+            else {
+                $needle = strtolower( $field );
+                foreach ( array_merge( $aliases, $fields ) as $key => $value ) {
+                    if ( strtolower( (string) $key ) === $needle ) { $actual = (string) $value; break; }
+                }
+            }
+        }
+
+        $actual_trim = trim( $actual );
+        $expected_trim = trim( $expected );
+        switch ( $operator ) {
+            case 'not_equals': return 0 !== strcasecmp( $actual_trim, $expected_trim );
+            case 'contains': return '' !== $expected_trim && false !== stripos( $actual, $expected_trim );
+            case 'not_contains': return '' === $expected_trim || false === stripos( $actual, $expected_trim );
+            case 'greater_than': return is_numeric( $actual_trim ) && is_numeric( $expected_trim ) && (float) $actual_trim > (float) $expected_trim;
+            case 'less_than': return is_numeric( $actual_trim ) && is_numeric( $expected_trim ) && (float) $actual_trim < (float) $expected_trim;
+            case 'is_empty': return '' === $actual_trim;
+            case 'is_not_empty': return '' !== $actual_trim;
+            case 'equals':
+            default: return 0 === strcasecmp( $actual_trim, $expected_trim );
+        }
+    }
+
+    public function get_message_template_for_submission( FormCourier_Notifications_Pro_Submission $submission ): string {
+        $templates = $this->get( 'form_message_templates', [] );
+        $route_key = sanitize_key( $submission->provider_key ) . ':' . sanitize_key( (string) $submission->form_id );
+
+        if ( is_array( $templates ) && isset( $templates[ $route_key ] ) && is_string( $templates[ $route_key ] ) && '' !== trim( $templates[ $route_key ] ) ) {
+            return (string) $templates[ $route_key ];
+        }
+
+        return (string) $this->get( 'message_template', '' );
+    }
+
+    public function remember_form( FormCourier_Notifications_Pro_Submission $submission ): void {
+        $known = get_option( 'formcourier_notifications_pro_known_forms', [] );
+        $known = is_array( $known ) ? $known : [];
+        $key = sanitize_key( $submission->provider_key ) . ':' . sanitize_key( (string) $submission->form_id );
+        $item = [ 'provider_key' => $submission->provider_key, 'provider_label' => $submission->provider_label, 'form_id' => $submission->form_id, 'form_name' => $submission->form_name ];
+        if ( ! isset( $known[ $key ] ) || $known[ $key ] !== $item ) {
+            $known[ $key ] = $item;
+            update_option( 'formcourier_notifications_pro_known_forms', $known, false );
+        }
+
+        // Remember technical field identifiers observed in real submissions as a fallback
+        // when a form builder changes its internal discovery API.
+        $known_fields = get_option( 'formcourier_notifications_pro_known_fields', [] );
+        $known_fields = is_array( $known_fields ) ? $known_fields : [];
+        $fields_for_form = isset( $known_fields[ $key ] ) && is_array( $known_fields[ $key ] ) ? $known_fields[ $key ] : [];
+        foreach ( array_keys( (array) $submission->field_aliases ) as $field_key ) {
+            $field_key = sanitize_text_field( (string) $field_key );
+            if ( '' !== $field_key ) { $fields_for_form[ $field_key ] = $this->humanize_field_key( $field_key ); }
+        }
+        foreach ( array_keys( (array) $submission->fields ) as $field_key ) {
+            $field_key = sanitize_text_field( (string) $field_key );
+            if ( '' !== $field_key && ! isset( $fields_for_form[ $field_key ] ) ) { $fields_for_form[ $field_key ] = $this->humanize_field_key( $field_key ); }
+        }
+        if ( ! empty( $fields_for_form ) ) {
+            $known_fields[ $key ] = $fields_for_form;
+            update_option( 'formcourier_notifications_pro_known_fields', $known_fields, false );
+        }
+    }
+
+    private function humanize_field_key( string $key ): string {
+        $label = preg_replace( '/[_-]+/', ' ', $key );
+        $label = preg_replace( '/\s+/', ' ', (string) $label );
+        return ucwords( trim( (string) $label ) );
+    }
+
+    public function is_form_provider_enabled( string $provider ): bool {
+        $providers = $this->get( 'providers', [] );
+        return is_array( $providers ) && in_array( $provider, $providers, true );
+    }
+
+    public function register(): void {
+        register_setting( 'formcourier_notifications_pro_group', self::OPTION, [ $this, 'sanitize' ] );
+    }
+
+    public function sanitize( $input ): array {
+        $old = wp_parse_args( get_option( self::OPTION, [] ), self::defaults() );
+        $input = is_array( $input ) ? $input : [];
+        $clean = $old;
+
+        if ( array_key_exists( 'enabled', $input ) || isset( $input['_section'] ) && 'telegram' === $input['_section'] ) {
+            $clean['enabled'] = ! empty( $input['enabled'] ) ? '1' : '0';
+        }
+
+        if ( array_key_exists( 'bot_token', $input ) ) {
+            $token = trim( sanitize_text_field( (string) $input['bot_token'] ) );
+            if ( '' !== $token ) {
+                $clean['bot_token'] = FormCourier_Notifications_Pro_Encryption::encrypt( $token );
+            }
+        }
+
+        if ( array_key_exists( 'chat_id', $input ) ) {
+            $clean['chat_id'] = sanitize_text_field( (string) $input['chat_id'] );
+        }
+
+        if ( isset( $input['_section'] ) && 'telegram' === $input['_section'] && isset( $input['destinations'] ) && is_array( $input['destinations'] ) ) {
+            $old_destinations = isset( $old['destinations'] ) && is_array( $old['destinations'] ) ? $old['destinations'] : [];
+            $destinations = [];
+            foreach ( $input['destinations'] as $raw_id => $raw_destination ) {
+                if ( ! is_array( $raw_destination ) ) { continue; }
+                $id = sanitize_key( (string) $raw_id );
+                if ( '' === $id ) { continue; }
+                $name = sanitize_text_field( (string) ( $raw_destination['name'] ?? '' ) );
+                $chat_id = sanitize_text_field( (string) ( $raw_destination['chat_id'] ?? '' ) );
+                if ( '' === $name && '' === $chat_id ) { continue; }
+                $token = trim( sanitize_text_field( (string) ( $raw_destination['bot_token'] ?? '' ) ) );
+                $encrypted = '';
+                if ( '' !== $token ) {
+                    $encrypted = FormCourier_Notifications_Pro_Encryption::encrypt( $token );
+                } elseif ( isset( $old_destinations[ $id ]['bot_token'] ) ) {
+                    $encrypted = (string) $old_destinations[ $id ]['bot_token'];
+                } elseif ( 'default' === $id && ! empty( $old['bot_token'] ) ) {
+                    $encrypted = (string) $old['bot_token'];
+                }
+                $destinations[ $id ] = [ 'name' => $name ?: ucfirst( str_replace( '-', ' ', $id ) ), 'bot_token' => $encrypted, 'chat_id' => $chat_id, 'enabled' => ! empty( $raw_destination['enabled'] ) ? '1' : '0' ];
+            }
+            $clean['destinations'] = $destinations;
+            $default = sanitize_key( (string) ( $input['default_destination'] ?? '' ) );
+            $clean['default_destination'] = isset( $destinations[ $default ] ) ? $default : ( $destinations ? array_key_first( $destinations ) : '' );
+        }
+
+        if ( isset( $input['_section'] ) && 'forms' === $input['_section'] ) {
+            $allowed = [ 'contact_form_7', 'wpforms', 'fluent_forms', 'forminator', 'ninja_forms', 'gravity_forms' ];
+            $providers = isset( $input['providers'] ) && is_array( $input['providers'] )
+                ? array_values( array_intersect( $allowed, array_map( 'sanitize_key', $input['providers'] ) ) )
+                : [];
+            $clean['providers'] = $providers;
+            $destinations = $this->get_destinations();
+            $routes = [];
+            if ( isset( $input['form_routes'] ) && is_array( $input['form_routes'] ) ) {
+                foreach ( $input['form_routes'] as $route_key => $destination_ids ) {
+                    $route_key = sanitize_text_field( (string) $route_key );
+                    if ( '' === $route_key ) { continue; }
+
+                    // Accept both the new checkbox array and the old single select value.
+                    if ( ! is_array( $destination_ids ) ) {
+                        $destination_ids = [ $destination_ids ];
+                    }
+
+                    $selected = [];
+                    foreach ( $destination_ids as $destination_id ) {
+                        $destination_id = sanitize_key( (string) $destination_id );
+                        if ( '' !== $destination_id && isset( $destinations[ $destination_id ] ) && ! in_array( $destination_id, $selected, true ) ) {
+                            $selected[] = $destination_id;
+                        }
+                    }
+
+                    if ( ! empty( $selected ) ) {
+                        $routes[ $route_key ] = $selected;
+                    }
+                }
+            }
+            $clean['form_routes'] = $routes;
+            $rules = [];
+            if ( isset( $input['conditional_rules'] ) && is_array( $input['conditional_rules'] ) ) {
+                $allowed_operators = [ 'equals', 'not_equals', 'contains', 'not_contains', 'greater_than', 'less_than', 'is_empty', 'is_not_empty' ];
+                foreach ( $input['conditional_rules'] as $rule ) {
+                    if ( ! is_array( $rule ) ) { continue; }
+                    $form_key = sanitize_text_field( (string) ( $rule['form_key'] ?? '' ) );
+                    $field = sanitize_text_field( (string) ( $rule['field'] ?? '' ) );
+                    $operator = sanitize_key( (string) ( $rule['operator'] ?? 'equals' ) );
+                    if ( ! in_array( $operator, $allowed_operators, true ) ) { $operator = 'equals'; }
+                    $mode = 'add' === sanitize_key( (string) ( $rule['mode'] ?? 'replace' ) ) ? 'add' : 'replace';
+                    $selected = [];
+                    foreach ( (array) ( $rule['destinations'] ?? [] ) as $destination_id ) {
+                        $destination_id = sanitize_key( (string) $destination_id );
+                        if ( isset( $destinations[ $destination_id ] ) && ! in_array( $destination_id, $selected, true ) ) { $selected[] = $destination_id; }
+                    }
+                    if ( '' === $form_key || '' === $field || empty( $selected ) ) { continue; }
+                    $rules[] = [
+                        'enabled'      => ! empty( $rule['enabled'] ) ? '1' : '0',
+                        'form_key'     => $form_key,
+                        'field'        => $field,
+                        'operator'     => $operator,
+                        'value'        => sanitize_text_field( (string) ( $rule['value'] ?? '' ) ),
+                        'mode'         => $mode,
+                        'destinations' => $selected,
+                    ];
+                }
+            }
+            $clean['conditional_rules'] = $rules;
+        }
+
+        if ( isset( $input['_section'] ) && 'message' === $input['_section'] ) {
+            if ( array_key_exists( 'message_template', $input ) ) {
+                $clean['message_template'] = FormCourier_Notifications_Pro_Message_Builder::sanitize_template( (string) $input['message_template'] );
+            }
+
+            $form_templates = [];
+            $enabled_templates = isset( $input['form_template_enabled'] ) && is_array( $input['form_template_enabled'] )
+                ? array_map( 'sanitize_text_field', array_keys( $input['form_template_enabled'] ) )
+                : [];
+            $raw_templates = isset( $input['form_message_templates'] ) && is_array( $input['form_message_templates'] )
+                ? $input['form_message_templates']
+                : [];
+
+            foreach ( $raw_templates as $route_key => $template ) {
+                $route_key = sanitize_text_field( (string) $route_key );
+                if ( '' === $route_key || ! in_array( $route_key, $enabled_templates, true ) ) {
+                    continue;
+                }
+
+                $template = FormCourier_Notifications_Pro_Message_Builder::sanitize_template( (string) $template );
+                if ( '' !== trim( $template ) ) {
+                    $form_templates[ $route_key ] = $template;
+                }
+            }
+
+            $clean['form_message_templates'] = $form_templates;
+        }
+
+        if ( isset( $input['_section'] ) && 'telegram' === $input['_section'] ) {
+            $clean['delete_data_on_uninstall'] = ! empty( $input['delete_data_on_uninstall'] ) ? '1' : '0';
+        }
+
+        unset( $clean['_section'] );
+        $this->settings = wp_parse_args( $clean, self::defaults() );
+        return $clean;
+    }
+
+    public function admin_menu(): void {
+        add_menu_page(
+            __( 'FormCourier Notifications Pro', 'formcourier-notifications-pro' ),
+            __( 'FormCourier Notifications Pro', 'formcourier-notifications-pro' ),
+            'manage_options',
+            'formcourier-notifications-pro',
+            [ $this, 'render_page' ],
+            'dashicons-format-chat',
+            58
+        );
+    }
+
+    public function enqueue_admin_assets( string $hook ): void {
+        if ( 'toplevel_page_formcourier-notifications-pro' !== $hook ) {
+            return;
+        }
+
+        wp_enqueue_style(
+            'formcourier-notifications-pro-admin',
+            FORMCOURIER_NOTIFICATIONS_PRO_URL . 'assets/admin.css',
+            [],
+            FORMCOURIER_NOTIFICATIONS_PRO_VERSION
+        );
+        wp_enqueue_script(
+            'formcourier-notifications-pro-admin',
+            FORMCOURIER_NOTIFICATIONS_PRO_URL . 'assets/admin.js',
+            [],
+            FORMCOURIER_NOTIFICATIONS_PRO_VERSION,
+            true
+        );
+
+        wp_localize_script(
+            'formcourier-notifications-pro-admin',
+            'FormCourierNotificationsProAdmin',
+            [
+                'formFields' => FormCourier_Notifications_Pro_Form_Discovery::fields(),
+                'fieldPlaceholder' => __( 'Select a field', 'formcourier-notifications-pro' ),
+                'customFieldLabel' => __( 'Custom / previously saved field', 'formcourier-notifications-pro' ),
+            ]
+        );
+    }
+
+    public function action_links( array $links ): array {
+        array_unshift( $links, '<a href="' . esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro' ) ) . '">' . esc_html__( 'Settings', 'formcourier-notifications-pro' ) . '</a>' );
+        return $links;
+    }
+
+    private function tabs(): array {
+        return [
+            'dashboard' => __( 'Dashboard', 'formcourier-notifications-pro' ),
+            'telegram'  => __( 'Telegram', 'formcourier-notifications-pro' ),
+            'forms'     => __( 'Forms', 'formcourier-notifications-pro' ),
+            'message'   => __( 'Message', 'formcourier-notifications-pro' ),
+            'logs'      => __( 'Logs', 'formcourier-notifications-pro' ),
+        ];
+    }
+
+    private function providers(): array {
+        return [
+            'contact_form_7' => [ 'label' => 'Contact Form 7', 'active' => defined( 'WPCF7_VERSION' ) || class_exists( 'WPCF7_ContactForm' ) ],
+            'wpforms'        => [ 'label' => 'WPForms', 'active' => function_exists( 'wpforms' ) || defined( 'WPFORMS_VERSION' ) ],
+            'fluent_forms'   => [ 'label' => 'Fluent Forms', 'active' => defined( 'FLUENTFORM' ) || defined( 'FLUENTFORM_VERSION' ) || function_exists( 'wpFluentForm' ) ],
+            'forminator'     => [ 'label' => 'Forminator', 'active' => defined( 'FORMINATOR_VERSION' ) || class_exists( 'Forminator' ) ],
+            'ninja_forms'    => [ 'label' => 'Ninja Forms', 'active' => function_exists( 'Ninja_Forms' ) || defined( 'NINJA_FORMS_VERSION' ) ],
+            'gravity_forms'  => [ 'label' => 'Gravity Forms', 'active' => class_exists( 'GFForms' ) || defined( 'GF_VERSION' ) ],
+        ];
+    }
+
+    public function render_page(): void {
+        if ( ! current_user_can( 'manage_options' ) ) { return; }
+
+        $tabs = $this->tabs();
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only admin navigation parameter; no data is changed.
+        $tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : 'dashboard';
+        if ( ! isset( $tabs[ $tab ] ) ) {
+            $tab = 'dashboard';
+        }
+
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only notice parameter set after a nonce-protected admin action.
+        $notice = isset( $_GET['fct_notice'] ) ? sanitize_key( wp_unslash( $_GET['fct_notice'] ) ) : '';
+        ?>
+        <div class="wrap fct-admin">
+            <div class="fct-header">
+                <div>
+                    <h1><?php esc_html_e( 'FormCourier Notifications Pro', 'formcourier-notifications-pro' ); ?></h1>
+                    <p><?php esc_html_e( 'Route WordPress form submissions to notification channels. Telegram is included in version 1.0.0.', 'formcourier-notifications-pro' ); ?></p>
+                </div>
+                <span class="fct-version">v<?php echo esc_html( FORMCOURIER_NOTIFICATIONS_PRO_VERSION ); ?></span>
+            </div>
+
+            <nav class="nav-tab-wrapper fct-tabs" aria-label="<?php esc_attr_e( 'FormCourier Notifications Pro sections', 'formcourier-notifications-pro' ); ?>">
+                <?php foreach ( $tabs as $key => $label ) : ?>
+                    <a class="nav-tab <?php echo $key === $tab ? 'nav-tab-active' : ''; ?>" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=' . $key ) ); ?>"><?php echo esc_html( $label ); ?></a>
+                <?php endforeach; ?>
+            </nav>
+
+            <?php $this->render_notice( $notice ); ?>
+
+            <div class="fct-content">
+                <?php
+                switch ( $tab ) {
+                    case 'telegram':
+                        $this->render_telegram_tab();
+                        break;
+                    case 'forms':
+                        $this->render_forms_tab();
+                        break;
+                    case 'message':
+                        $this->render_message_tab();
+                        break;
+                    case 'logs':
+                        $this->render_logs_tab();
+                        break;
+                    default:
+                        $this->render_dashboard_tab();
+                        break;
+                }
+                ?>
+            </div>
+        </div>
+        <?php
+    }
+
+    private function render_notice( string $notice ): void {
+        if ( 'test_success' === $notice ) {
+            echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Test message sent successfully.', 'formcourier-notifications-pro' ) . '</p></div>';
+        } elseif ( 'test_error' === $notice ) {
+            $error = get_transient( 'formcourier_notifications_pro_test_error' ) ?: __( 'Telegram test failed.', 'formcourier-notifications-pro' );
+            echo '<div class="notice notice-error is-dismissible"><p>' . esc_html( $error ) . '</p></div>';
+        } elseif ( 'logs_cleared' === $notice ) {
+            echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Logs cleared.', 'formcourier-notifications-pro' ) . '</p></div>';
+        } elseif ( 'retry_success' === $notice ) {
+            echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Message sent successfully on retry.', 'formcourier-notifications-pro' ) . '</p></div>';
+        } elseif ( 'retry_error' === $notice ) {
+            $error = get_transient( 'formcourier_notifications_pro_retry_error' ) ?: __( 'Retry failed.', 'formcourier-notifications-pro' );
+            echo '<div class="notice notice-error is-dismissible"><p>' . esc_html( $error ) . '</p></div>';
+        }
+    }
+
+    private function render_dashboard_tab(): void {
+        $settings = wp_parse_args( get_option( self::OPTION, [] ), self::defaults() );
+        $providers = $this->providers();
+        $enabled_providers = (array) $settings['providers'];
+        $token_ready = ! empty( $settings['bot_token'] );
+        $chat_ready = '' !== trim( (string) $settings['chat_id'] );
+        $integration_ready = '1' === $settings['enabled'] && $token_ready && $chat_ready;
+        $active_forms = 0;
+        foreach ( $providers as $provider ) {
+            if ( $provider['active'] ) { $active_forms++; }
+        }
+        ?>
+        <div class="fct-grid fct-grid-3">
+            <?php $this->status_card( __( 'Telegram integration', 'formcourier-notifications-pro' ), $integration_ready ? __( 'Ready', 'formcourier-notifications-pro' ) : __( 'Needs setup', 'formcourier-notifications-pro' ), $integration_ready ); ?>
+            <?php $this->status_card( __( 'Bot token', 'formcourier-notifications-pro' ), $token_ready ? __( 'Configured', 'formcourier-notifications-pro' ) : __( 'Not configured', 'formcourier-notifications-pro' ), $token_ready ); ?>
+            <?php $this->status_card( __( 'Chat ID', 'formcourier-notifications-pro' ), $chat_ready ? __( 'Configured', 'formcourier-notifications-pro' ) : __( 'Not configured', 'formcourier-notifications-pro' ), $chat_ready ); ?>
+        </div>
+
+        <div class="fct-card">
+            <div class="fct-card-heading">
+                <div>
+                    <h2><?php esc_html_e( 'Supported forms', 'formcourier-notifications-pro' ); ?></h2>
+                    <?php /* translators: 1: Number of active supported form plugins, 2: Total number of supported form plugins. */ ?>
+                    <p><?php echo esc_html( sprintf( __( '%1$d of %2$d supported form plugins are active on this site.', 'formcourier-notifications-pro' ), $active_forms, count( $providers ) ) ); ?></p>
+                </div>
+                <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=forms' ) ); ?>"><?php esc_html_e( 'Manage Forms', 'formcourier-notifications-pro' ); ?></a>
+            </div>
+            <div class="fct-provider-list">
+                <?php foreach ( $providers as $key => $provider ) :
+                    $receives = in_array( $key, $enabled_providers, true );
+                    ?>
+                    <div class="fct-provider-row">
+                        <strong><?php echo esc_html( $provider['label'] ); ?></strong>
+                        <div class="fct-provider-statuses">
+                            <span class="fct-badge <?php echo $provider['active'] ? 'is-success' : 'is-muted'; ?>"><?php echo esc_html( $provider['active'] ? __( 'Active', 'formcourier-notifications-pro' ) : __( 'Not active', 'formcourier-notifications-pro' ) ); ?></span>
+                            <span class="fct-badge <?php echo $receives ? 'is-info' : 'is-muted'; ?>"><?php echo esc_html( $receives ? __( 'Enabled', 'formcourier-notifications-pro' ) : __( 'Disabled', 'formcourier-notifications-pro' ) ); ?></span>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+
+        <div class="fct-grid fct-grid-2">
+            <div class="fct-card">
+                <h2><?php esc_html_e( 'Quick actions', 'formcourier-notifications-pro' ); ?></h2>
+                <p><?php esc_html_e( 'Configure Telegram, customize the message template or review recent deliveries.', 'formcourier-notifications-pro' ); ?></p>
+                <div class="fct-actions">
+                    <a class="button button-primary" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=telegram' ) ); ?>"><?php esc_html_e( 'Telegram Settings', 'formcourier-notifications-pro' ); ?></a>
+                    <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=message' ) ); ?>"><?php esc_html_e( 'Edit Message', 'formcourier-notifications-pro' ); ?></a>
+                    <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs' ) ); ?>"><?php esc_html_e( 'View Logs', 'formcourier-notifications-pro' ); ?></a>
+                </div>
+            </div>
+            <div class="fct-card">
+                <h2><?php esc_html_e( 'Recent activity', 'formcourier-notifications-pro' ); ?></h2>
+                <?php $logs = FormCourier_Notifications_Pro_Logger::all(); ?>
+                <?php if ( empty( $logs ) ) : ?>
+                    <p class="fct-muted"><?php esc_html_e( 'No messages have been logged yet.', 'formcourier-notifications-pro' ); ?></p>
+                <?php else : $latest = $logs[0]; ?>
+                    <p><strong><?php echo esc_html( $latest['provider'] ?? '' ); ?></strong><br><?php echo esc_html( $latest['form_name'] ?? '' ); ?></p>
+                    <p><span class="fct-badge <?php echo 'success' === ( $latest['status'] ?? '' ) ? 'is-success' : 'is-error'; ?>"><?php echo esc_html( ucfirst( (string) ( $latest['status'] ?? '' ) ) ); ?></span> <span class="fct-muted"><?php echo esc_html( $latest['time'] ?? '' ); ?></span></p>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php
+    }
+
+    private function status_card( string $title, string $value, bool $ok ): void {
+        ?>
+        <div class="fct-card fct-status-card">
+            <span class="fct-status-dot <?php echo $ok ? 'is-success' : 'is-warning'; ?>"></span>
+            <div><span class="fct-card-label"><?php echo esc_html( $title ); ?></span><strong><?php echo esc_html( $value ); ?></strong></div>
+        </div>
+        <?php
+    }
+
+    private function render_telegram_tab(): void {
+        $settings = wp_parse_args( get_option( self::OPTION, [] ), self::defaults() );
+        $destinations = $this->get_destinations();
+        if ( empty( $destinations ) ) {
+            $destinations = [ 'sales' => [ 'name' => 'Sales', 'bot_token' => '', 'chat_id' => '', 'enabled' => '1' ] ];
+        }
+        ?>
+        <div class="fct-card fct-card-form">
+            <h2><?php esc_html_e( 'Telegram destinations', 'formcourier-notifications-pro' ); ?></h2>
+            <p><?php esc_html_e( 'Create multiple Telegram destinations for Sales, Support, HR or any other team.', 'formcourier-notifications-pro' ); ?></p>
+            <form method="post" action="options.php">
+                <?php settings_fields( 'formcourier_notifications_pro_group' ); ?>
+                <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_section]" value="telegram">
+                <p><label><input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[enabled]" value="1" <?php checked( $settings['enabled'], '1' ); ?>> <?php esc_html_e( 'Enable Telegram notifications', 'formcourier-notifications-pro' ); ?></label></p>
+                <div id="fcnp-destinations">
+                    <?php foreach ( $destinations as $id => $destination ) : ?>
+                        <div class="fct-destination" data-id="<?php echo esc_attr( $id ); ?>">
+                            <div class="fct-card-heading"><h3><?php echo esc_html( $destination['name'] ?? $id ); ?></h3><button type="button" class="button-link-delete fcnp-remove-destination"><?php esc_html_e( 'Remove', 'formcourier-notifications-pro' ); ?></button></div>
+                            <div class="fct-destination-grid">
+                                <p><label><?php esc_html_e( 'Name', 'formcourier-notifications-pro' ); ?><br><input class="regular-text fcnp-destination-name" type="text" name="<?php echo esc_attr( self::OPTION ); ?>[destinations][<?php echo esc_attr( $id ); ?>][name]" value="<?php echo esc_attr( $destination['name'] ?? '' ); ?>"></label></p>
+                                <p><label><?php esc_html_e( 'Bot Token', 'formcourier-notifications-pro' ); ?><br><input class="regular-text" type="password" autocomplete="new-password" name="<?php echo esc_attr( self::OPTION ); ?>[destinations][<?php echo esc_attr( $id ); ?>][bot_token]" value="" placeholder="<?php echo ! empty( $destination['bot_token'] ) ? esc_attr__( 'Saved - enter a new token to replace it', 'formcourier-notifications-pro' ) : ''; ?>"></label></p>
+                                <p><label><?php esc_html_e( 'Chat ID', 'formcourier-notifications-pro' ); ?><br><input class="regular-text" type="text" name="<?php echo esc_attr( self::OPTION ); ?>[destinations][<?php echo esc_attr( $id ); ?>][chat_id]" value="<?php echo esc_attr( $destination['chat_id'] ?? '' ); ?>"></label></p>
+                                <p><label><input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[destinations][<?php echo esc_attr( $id ); ?>][enabled]" value="1" <?php checked( $destination['enabled'] ?? '1', '1' ); ?>> <?php esc_html_e( 'Enabled', 'formcourier-notifications-pro' ); ?></label></p>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+                <p><button type="button" class="button" id="fcnp-add-destination"><?php esc_html_e( 'Add Destination', 'formcourier-notifications-pro' ); ?></button></p>
+                <table class="form-table" role="presentation"><tr><th><?php esc_html_e( 'Default destination', 'formcourier-notifications-pro' ); ?></th><td><select name="<?php echo esc_attr( self::OPTION ); ?>[default_destination]" id="fcnp-default-destination"><?php foreach ( $destinations as $id => $destination ) : ?><option value="<?php echo esc_attr( $id ); ?>" <?php selected( $this->get_default_destination_id(), $id ); ?>><?php echo esc_html( $destination['name'] ?? $id ); ?></option><?php endforeach; ?></select><p class="description"><?php esc_html_e( 'Forms without a custom route are sent here.', 'formcourier-notifications-pro' ); ?></p></td></tr></table>
+                <p><label><input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[delete_data_on_uninstall]" value="1" <?php checked( $settings['delete_data_on_uninstall'], '1' ); ?>> <?php esc_html_e( 'Delete plugin settings and logs when uninstalled', 'formcourier-notifications-pro' ); ?></label></p>
+                <?php submit_button( __( 'Save Telegram Destinations', 'formcourier-notifications-pro' ) ); ?>
+            </form>
+        </div>
+        <div class="fct-card"><h2><?php esc_html_e( 'Connection test', 'formcourier-notifications-pro' ); ?></h2><p><?php esc_html_e( 'Choose a saved destination and send a test message.', 'formcourier-notifications-pro' ); ?></p><form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"><input type="hidden" name="action" value="formcourier_notifications_pro_test"><?php wp_nonce_field( 'formcourier_notifications_pro_test' ); ?><select name="destination_id"><?php foreach ( $this->get_destinations() as $id => $destination ) : ?><option value="<?php echo esc_attr( $id ); ?>"><?php echo esc_html( $destination['name'] ?? $id ); ?></option><?php endforeach; ?></select> <?php submit_button( __( 'Send Test Message', 'formcourier-notifications-pro' ), 'secondary', 'submit', false ); ?></form></div>
+        <?php
+    }
+
+    private function render_forms_tab(): void {
+        $settings = wp_parse_args( get_option( self::OPTION, [] ), self::defaults() );
+        $providers = $this->providers();
+        ?>
+        <div class="fct-card fct-card-form">
+            <h2><?php esc_html_e( 'Form providers', 'formcourier-notifications-pro' ); ?></h2>
+            <p><?php esc_html_e( 'Choose which supported form plugins are allowed to send submissions to Telegram.', 'formcourier-notifications-pro' ); ?></p>
+            <form method="post" action="options.php">
+                <?php settings_fields( 'formcourier_notifications_pro_group' ); ?>
+                <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_section]" value="forms">
+                <div class="fct-provider-cards">
+                    <?php foreach ( $providers as $key => $provider ) : ?>
+                        <label class="fct-provider-card">
+                            <span class="fct-provider-check"><input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[providers][]" value="<?php echo esc_attr( $key ); ?>" <?php checked( in_array( $key, (array) $settings['providers'], true ) ); ?>></span>
+                            <span class="fct-provider-copy"><strong><?php echo esc_html( $provider['label'] ); ?></strong><small><?php echo esc_html( $provider['active'] ? __( 'Plugin detected and active', 'formcourier-notifications-pro' ) : __( 'Plugin not detected', 'formcourier-notifications-pro' ) ); ?></small></span>
+                            <span class="fct-badge <?php echo $provider['active'] ? 'is-success' : 'is-muted'; ?>"><?php echo esc_html( $provider['active'] ? __( 'Active', 'formcourier-notifications-pro' ) : __( 'Inactive', 'formcourier-notifications-pro' ) ); ?></span>
+                        </label>
+                    <?php endforeach; ?>
+                </div>
+                <?php $known_forms = FormCourier_Notifications_Pro_Form_Discovery::all(); $destinations = $this->get_destinations(); ?>
+                <?php if ( ! empty( $known_forms ) && ! empty( $destinations ) ) : ?>
+                    <hr>
+                    <h2><?php esc_html_e( 'Form routing', 'formcourier-notifications-pro' ); ?></h2>
+                    <p><?php esc_html_e( 'Choose one or more Telegram destinations for each form. If none are selected, the form uses the default destination.', 'formcourier-notifications-pro' ); ?></p>
+                    <table class="widefat striped fct-routing-table">
+                        <thead><tr><th><?php esc_html_e( 'Provider', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Form', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Destinations', 'formcourier-notifications-pro' ); ?></th></tr></thead>
+                        <tbody>
+                        <?php foreach ( $known_forms as $route_key => $form ) :
+                            $saved_route = $settings['form_routes'][ $route_key ] ?? [];
+                            if ( is_string( $saved_route ) && '' !== $saved_route ) { $saved_route = [ $saved_route ]; }
+                            $saved_route = is_array( $saved_route ) ? array_map( 'sanitize_key', $saved_route ) : [];
+                            ?>
+                            <tr>
+                                <td><?php echo esc_html( $form['provider_label'] ?? '' ); ?></td>
+                                <td><?php echo esc_html( ( $form['form_name'] ?? '' ) . ' (#' . ( $form['form_id'] ?? '' ) . ')' ); ?></td>
+                                <td>
+                                    <div class="fct-route-destinations">
+                                        <?php foreach ( $destinations as $destination_id => $destination ) : ?>
+                                            <label class="fct-route-option">
+                                                <input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[form_routes][<?php echo esc_attr( $route_key ); ?>][]" value="<?php echo esc_attr( $destination_id ); ?>" <?php checked( in_array( $destination_id, $saved_route, true ) ); ?>>
+                                                <span><?php echo esc_html( $destination['name'] ?? $destination_id ); ?></span>
+                                                <?php if ( $destination_id === $this->get_default_destination_id() ) : ?><small><?php esc_html_e( 'Default', 'formcourier-notifications-pro' ); ?></small><?php endif; ?>
+                                            </label>
+                                        <?php endforeach; ?>
+                                    </div>
+                                    <p class="description"><?php esc_html_e( 'No selection = use the default destination.', 'formcourier-notifications-pro' ); ?></p>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php else : ?>
+                    <hr><h2><?php esc_html_e( 'Form routing', 'formcourier-notifications-pro' ); ?></h2><p class="fct-muted"><?php esc_html_e( 'No forms were found in the active supported form plugins.', 'formcourier-notifications-pro' ); ?></p>
+                <?php endif; ?>
+                <?php if ( ! empty( $known_forms ) && ! empty( $destinations ) ) : ?>
+                    <hr>
+                    <div class="fct-card-heading fct-rules-heading">
+                        <div>
+                            <h2><?php esc_html_e( 'Conditional routing', 'formcourier-notifications-pro' ); ?></h2>
+                            <p><?php esc_html_e( 'Send a submission to different destinations when a field matches a condition.', 'formcourier-notifications-pro' ); ?></p>
+                        </div>
+                        <button type="button" class="button" id="fcnp-add-rule"><?php esc_html_e( 'Add Rule', 'formcourier-notifications-pro' ); ?></button>
+                    </div>
+                    <div id="fcnp-rules">
+                        <?php foreach ( (array) ( $settings['conditional_rules'] ?? [] ) as $index => $rule ) : ?>
+                            <?php $this->render_rule_row( (int) $index, $rule, $known_forms, $destinations ); ?>
+                        <?php endforeach; ?>
+                    </div>
+                    <template id="fcnp-rule-template"><?php $this->render_rule_row( '__INDEX__', [], $known_forms, $destinations ); ?></template>
+                    <p class="description"><?php esc_html_e( 'Fields are loaded automatically from the selected form. If a saved field is no longer discoverable, it remains available as a custom value.', 'formcourier-notifications-pro' ); ?></p>
+                <?php endif; ?>
+                <?php submit_button( __( 'Save Form Settings', 'formcourier-notifications-pro' ) ); ?>
+            </form>
+        </div>
+        <?php
+    }
+
+    /** @param int|string $index @param array<string,mixed> $rule @param array<string,array<string,mixed>> $forms @param array<string,array<string,mixed>> $destinations */
+    private function render_rule_row( $index, array $rule, array $forms, array $destinations ): void {
+        $prefix = self::OPTION . '[conditional_rules][' . $index . ']';
+        $operator = (string) ( $rule['operator'] ?? 'equals' );
+        $mode = (string) ( $rule['mode'] ?? 'replace' );
+        $selected_destinations = array_map( 'sanitize_key', (array) ( $rule['destinations'] ?? [] ) );
+        ?>
+        <div class="fct-rule-row">
+            <div class="fct-rule-top">
+                <label><input type="checkbox" name="<?php echo esc_attr( $prefix ); ?>[enabled]" value="1" <?php checked( $rule['enabled'] ?? '1', '1' ); ?>> <?php esc_html_e( 'Enabled', 'formcourier-notifications-pro' ); ?></label>
+                <button type="button" class="button-link-delete fcnp-remove-rule"><?php esc_html_e( 'Remove', 'formcourier-notifications-pro' ); ?></button>
+            </div>
+            <div class="fct-rule-grid">
+                <?php
+                $selected_form_key = (string) ( $rule['form_key'] ?? '' );
+                if ( '' === $selected_form_key && ! empty( $forms ) ) { $selected_form_key = (string) array_key_first( $forms ); }
+                $all_form_fields = FormCourier_Notifications_Pro_Form_Discovery::fields();
+                $available_fields = isset( $all_form_fields[ $selected_form_key ] ) && is_array( $all_form_fields[ $selected_form_key ] ) ? $all_form_fields[ $selected_form_key ] : [];
+                $selected_field = sanitize_text_field( (string) ( $rule['field'] ?? '' ) );
+                ?>
+                <label><?php esc_html_e( 'Form', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-form" name="<?php echo esc_attr( $prefix ); ?>[form_key]">
+                    <?php foreach ( $forms as $form_key => $form ) : ?><option value="<?php echo esc_attr( $form_key ); ?>" <?php selected( $selected_form_key, $form_key ); ?>><?php echo esc_html( ( $form['provider_label'] ?? '' ) . ' - ' . ( $form['form_name'] ?? '' ) . ' (#' . ( $form['form_id'] ?? '' ) . ')' ); ?></option><?php endforeach; ?>
+                </select></label>
+                <label><?php esc_html_e( 'Field', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-field" name="<?php echo esc_attr( $prefix ); ?>[field]" data-selected="<?php echo esc_attr( $selected_field ); ?>">
+                    <option value=""><?php esc_html_e( 'Select a field', 'formcourier-notifications-pro' ); ?></option>
+                    <?php foreach ( $available_fields as $field_key => $field_label ) : ?><option value="<?php echo esc_attr( $field_key ); ?>" <?php selected( $selected_field, $field_key ); ?>><?php echo esc_html( $field_label . ' (' . $field_key . ')' ); ?></option><?php endforeach; ?>
+                    <?php if ( '' !== $selected_field && ! isset( $available_fields[ $selected_field ] ) ) : ?><option value="<?php echo esc_attr( $selected_field ); ?>" selected><?php echo esc_html( $selected_field . ' - ' . __( 'Custom / previously saved field', 'formcourier-notifications-pro' ) ); ?></option><?php endif; ?>
+                </select></label>
+                <label><?php esc_html_e( 'Operator', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-operator" name="<?php echo esc_attr( $prefix ); ?>[operator]">
+                    <?php foreach ( [ 'equals' => 'Equals', 'not_equals' => 'Does not equal', 'contains' => 'Contains', 'not_contains' => 'Does not contain', 'greater_than' => 'Greater than', 'less_than' => 'Less than', 'is_empty' => 'Is empty', 'is_not_empty' => 'Is not empty' ] as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( $operator, $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?>
+                </select></label>
+                <label class="fcnp-rule-value-wrap"><?php esc_html_e( 'Value', 'formcourier-notifications-pro' ); ?><input type="text" name="<?php echo esc_attr( $prefix ); ?>[value]" value="<?php echo esc_attr( $rule['value'] ?? '' ); ?>"></label>
+                <label><?php esc_html_e( 'Action', 'formcourier-notifications-pro' ); ?><select name="<?php echo esc_attr( $prefix ); ?>[mode]"><option value="replace" <?php selected( $mode, 'replace' ); ?>><?php esc_html_e( 'Replace form destinations', 'formcourier-notifications-pro' ); ?></option><option value="add" <?php selected( $mode, 'add' ); ?>><?php esc_html_e( 'Add destinations', 'formcourier-notifications-pro' ); ?></option></select></label>
+            </div>
+            <div class="fct-rule-destinations"><strong><?php esc_html_e( 'Destinations', 'formcourier-notifications-pro' ); ?></strong><div class="fct-route-destinations">
+                <?php foreach ( $destinations as $destination_id => $destination ) : ?><label class="fct-route-option"><input type="checkbox" name="<?php echo esc_attr( $prefix ); ?>[destinations][]" value="<?php echo esc_attr( $destination_id ); ?>" <?php checked( in_array( $destination_id, $selected_destinations, true ) ); ?>><span><?php echo esc_html( $destination['name'] ?? $destination_id ); ?></span></label><?php endforeach; ?>
+            </div></div>
+        </div>
+        <?php
+    }
+
+    private function render_message_tab(): void {
+        $settings       = wp_parse_args( get_option( self::OPTION, [] ), self::defaults() );
+        $forms          = FormCourier_Notifications_Pro_Form_Discovery::all();
+        $form_fields    = FormCourier_Notifications_Pro_Form_Discovery::fields();
+        $form_templates = isset( $settings['form_message_templates'] ) && is_array( $settings['form_message_templates'] ) ? $settings['form_message_templates'] : [];
+        ?>
+        <form method="post" action="options.php">
+            <?php settings_fields( 'formcourier_notifications_pro_group' ); ?>
+            <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_section]" value="message">
+
+            <div class="fct-grid fct-grid-message">
+                <div class="fct-card fct-card-form">
+                    <h2><?php esc_html_e( 'Default message template', 'formcourier-notifications-pro' ); ?></h2>
+                    <p><?php esc_html_e( 'This template is used by every form that does not have its own custom template.', 'formcourier-notifications-pro' ); ?></p>
+                    <textarea id="fct-template" class="large-text code fct-template" rows="14" name="<?php echo esc_attr( self::OPTION ); ?>[message_template]"><?php echo esc_textarea( $settings['message_template'] ); ?></textarea>
+                    <p class="description"><?php esc_html_e( 'Telegram HTML is supported: <b>, <strong>, <i>, <em>, <u>, <s>, <code>, <pre> and <a>.', 'formcourier-notifications-pro' ); ?></p>
+                </div>
+                <div class="fct-card">
+                    <h2><?php esc_html_e( 'Global placeholders', 'formcourier-notifications-pro' ); ?></h2>
+                    <div class="fct-placeholders">
+                        <?php foreach ( [ '{form_provider}', '{provider}', '{form_id}', '{form_name}', '{destination}', '{submitted_at}', '{all_fields}', '{page_url}', '{site_name}', '{site_url}', '{date}', '{time}', '{field:FIELD_NAME}' ] as $placeholder ) : ?>
+                            <code><?php echo esc_html( $placeholder ); ?></code>
+                        <?php endforeach; ?>
+                    </div>
+                    <p class="description"><?php esc_html_e( 'Use {field:FIELD_NAME} for a specific form field. Form-specific field placeholders are shown below.', 'formcourier-notifications-pro' ); ?></p>
+                    <div class="fct-preview">
+                        <span class="fct-preview-label"><?php esc_html_e( 'Example', 'formcourier-notifications-pro' ); ?></span>
+                        <div class="fct-telegram-bubble">
+                            <strong>🆕 New form submission</strong><br><br>
+                            <strong>Form:</strong> Contact Form 7<br><br>
+                            <strong>Name:</strong> John Smith<br>
+                            <strong>Email:</strong> john@example.com<br>
+                            <strong>Phone:</strong> +44 7700 900123<br>
+                            <strong>Message:</strong> I would like more information.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="fct-card">
+                <div class="fct-card-heading">
+                    <div>
+                        <h2><?php esc_html_e( 'Form-specific templates', 'formcourier-notifications-pro' ); ?></h2>
+                        <p><?php esc_html_e( 'Enable a custom template only for forms that need a different Telegram message.', 'formcourier-notifications-pro' ); ?></p>
+                    </div>
+                </div>
+
+                <?php if ( empty( $forms ) ) : ?>
+                    <div class="fct-empty"><span class="dashicons dashicons-feedback"></span><p><?php esc_html_e( 'No supported forms were discovered yet.', 'formcourier-notifications-pro' ); ?></p></div>
+                <?php else : ?>
+                    <div class="fct-form-template-list">
+                        <?php foreach ( $forms as $route_key => $form ) :
+                            $custom_template = isset( $form_templates[ $route_key ] ) ? (string) $form_templates[ $route_key ] : '';
+                            $is_enabled      = '' !== trim( $custom_template );
+                            $fields          = isset( $form_fields[ $route_key ] ) && is_array( $form_fields[ $route_key ] ) ? $form_fields[ $route_key ] : [];
+                            ?>
+                            <div class="fct-form-template-card <?php echo $is_enabled ? 'is-enabled' : ''; ?>">
+                                <div class="fct-form-template-head">
+                                    <div>
+                                        <strong><?php echo esc_html( (string) ( $form['form_name'] ?? '' ) ); ?></strong>
+                                        <span><?php echo esc_html( (string) ( $form['provider_label'] ?? '' ) . ' #' . (string) ( $form['form_id'] ?? '' ) ); ?></span>
+                                    </div>
+                                    <label class="fct-template-toggle">
+                                        <input class="fcnp-template-enabled" type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[form_template_enabled][<?php echo esc_attr( $route_key ); ?>]" value="1" <?php checked( $is_enabled ); ?>>
+                                        <?php esc_html_e( 'Use custom template', 'formcourier-notifications-pro' ); ?>
+                                    </label>
+                                </div>
+                                <div class="fct-form-template-body" <?php echo $is_enabled ? '' : 'hidden'; ?>>
+                                    <?php if ( ! empty( $fields ) ) : ?>
+                                        <div class="fct-form-field-placeholders">
+                                            <span><?php esc_html_e( 'Fields:', 'formcourier-notifications-pro' ); ?></span>
+                                            <?php foreach ( $fields as $field_key => $field_label ) : ?>
+                                                <code title="<?php echo esc_attr( (string) $field_label ); ?>"><?php echo esc_html( '{field:' . $field_key . '}' ); ?></code>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    <textarea class="large-text code fct-form-template-textarea" rows="10" name="<?php echo esc_attr( self::OPTION ); ?>[form_message_templates][<?php echo esc_attr( $route_key ); ?>]" placeholder="<?php esc_attr_e( 'Enter a custom template for this form.', 'formcourier-notifications-pro' ); ?>"><?php echo esc_textarea( $custom_template ); ?></textarea>
+                                    <p class="description"><?php esc_html_e( 'When disabled, this form automatically uses the Default message template above.', 'formcourier-notifications-pro' ); ?></p>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+
+                <?php submit_button( __( 'Save Message Templates', 'formcourier-notifications-pro' ) ); ?>
+            </div>
+        </form>
+        <?php
+    }
+
+    private function render_logs_tab(): void {
+        $logs = FormCourier_Notifications_Pro_Logger::all();
+        ?>
+        <div class="fct-card">
+            <div class="fct-card-heading">
+                <div><h2><?php esc_html_e( 'Recent logs', 'formcourier-notifications-pro' ); ?></h2><p><?php esc_html_e( 'The latest 100 Telegram delivery attempts are stored locally.', 'formcourier-notifications-pro' ); ?></p></div>
+                <?php if ( ! empty( $logs ) ) : ?>
+                    <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                        <input type="hidden" name="action" value="formcourier_notifications_pro_clear_logs">
+                        <?php wp_nonce_field( 'formcourier_notifications_pro_clear_logs' ); ?>
+                        <?php submit_button( __( 'Clear Logs', 'formcourier-notifications-pro' ), 'delete', 'submit', false ); ?>
+                    </form>
+                <?php endif; ?>
+            </div>
+            <?php if ( empty( $logs ) ) : ?>
+                <div class="fct-empty"><span class="dashicons dashicons-list-view"></span><p><?php esc_html_e( 'No logs yet.', 'formcourier-notifications-pro' ); ?></p></div>
+            <?php else : ?>
+                <div class="fct-table-wrap">
+                    <table class="widefat striped fct-logs-table">
+                        <thead><tr><th><?php esc_html_e( 'Date', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Channel', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Provider', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Form', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Destination', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Status', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Attempts', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Details', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Actions', 'formcourier-notifications-pro' ); ?></th></tr></thead>
+                        <tbody>
+                        <?php foreach ( $logs as $log ) : ?>
+                            <tr>
+                                <td class="fct-nowrap"><?php echo esc_html( $log['time'] ?? '' ); ?></td>
+                                <td><?php echo esc_html( $log['channel'] ?? 'Telegram' ); ?></td>
+                                <td><?php echo esc_html( $log['provider'] ?? '' ); ?></td>
+                                <td><?php echo esc_html( trim( '#' . ( $log['form_id'] ?? '' ) . ' ' . ( $log['form_name'] ?? '' ) ) ); ?></td>
+                                <td><strong><?php echo esc_html( $log['destination'] ?? ( $log['destination_id'] ?? '' ) ); ?></strong></td>
+                                <td><span class="fct-badge <?php echo 'success' === ( $log['status'] ?? '' ) ? 'is-success' : 'is-error'; ?>"><?php echo esc_html( ucfirst( (string) ( $log['status'] ?? '' ) ) ); ?></span></td>
+                                <td><?php echo esc_html( (string) max( 1, absint( $log['attempts'] ?? 1 ) ) ); ?></td>
+                                <td>
+                                    <?php echo esc_html( $log['message'] ?? '' ); ?>
+                                    <?php if ( ! empty( $log['next_retry_at'] ) ) : ?>
+                                        <br><small><strong><?php esc_html_e( 'Automatic retry:', 'formcourier-notifications-pro' ); ?></strong> <?php echo esc_html( (string) $log['next_retry_at'] ); ?></small>
+                                    <?php elseif ( 'exhausted' === ( $log['auto_retry_state'] ?? '' ) ) : ?>
+                                        <br><small><?php esc_html_e( 'Automatic retries exhausted. Manual retry is still available.', 'formcourier-notifications-pro' ); ?></small>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php if ( 'success' !== ( $log['status'] ?? '' ) && ! empty( $log['retry_payload'] ) && ! empty( $log['id'] ) ) : ?>
+                                        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                                            <input type="hidden" name="action" value="formcourier_notifications_pro_retry_log">
+                                            <input type="hidden" name="log_id" value="<?php echo esc_attr( (string) $log['id'] ); ?>">
+                                            <?php wp_nonce_field( 'formcourier_notifications_pro_retry_log_' . (string) $log['id'] ); ?>
+                                            <?php submit_button( __( 'Retry', 'formcourier-notifications-pro' ), 'secondary small', 'submit', false ); ?>
+                                        </form>
+                                    <?php else : ?>
+                                        <span aria-hidden="true">—</span>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    public function handle_test(): void {
+        if ( ! current_user_can( 'manage_options' ) ) { wp_die( esc_html__( 'Access denied.', 'formcourier-notifications-pro' ) ); }
+        check_admin_referer( 'formcourier_notifications_pro_test' );
+        $provider = new FormCourier_Notifications_Pro_Telegram_Provider( new self() );
+        $destination_id = isset( $_POST['destination_id'] ) ? sanitize_key( wp_unslash( $_POST['destination_id'] ) ) : '';
+        $result = $provider->send_test( $destination_id );
+        if ( 'success' !== ( $result['status'] ?? '' ) ) {
+            set_transient( 'formcourier_notifications_pro_test_error', $result['message'] ?? 'Unknown error', 60 );
+        }
+        wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=telegram&fct_notice=' . ( 'success' === ( $result['status'] ?? '' ) ? 'test_success' : 'test_error' ) ) );
+        exit;
+    }
+
+    public function handle_retry_log(): void {
+        if ( ! current_user_can( 'manage_options' ) ) { wp_die( esc_html__( 'Access denied.', 'formcourier-notifications-pro' ) ); }
+
+        $log_id = isset( $_POST['log_id'] ) ? sanitize_text_field( wp_unslash( $_POST['log_id'] ) ) : '';
+        if ( '' === $log_id ) {
+            wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs&fct_notice=retry_error' ) );
+            exit;
+        }
+
+        check_admin_referer( 'formcourier_notifications_pro_retry_log_' . $log_id );
+        $log = FormCourier_Notifications_Pro_Logger::get( $log_id );
+        $payload = isset( $log['retry_payload'] ) && is_array( $log['retry_payload'] ) ? $log['retry_payload'] : [];
+
+        if ( empty( $log ) || empty( $payload ) || 'telegram' !== sanitize_key( (string) ( $log['channel_id'] ?? '' ) ) ) {
+            set_transient( 'formcourier_notifications_pro_retry_error', __( 'This log entry cannot be retried.', 'formcourier-notifications-pro' ), 60 );
+            wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs&fct_notice=retry_error' ) );
+            exit;
+        }
+
+        $result = FormCourier_Notifications_Pro_Retry_Queue::retry_log( $log_id, false );
+        $status = (string) ( $result['status'] ?? 'error' );
+
+        if ( 'success' !== $status ) {
+            set_transient( 'formcourier_notifications_pro_retry_error', (string) ( $result['message'] ?? __( 'Retry failed.', 'formcourier-notifications-pro' ) ), 60 );
+        }
+
+        wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs&fct_notice=' . ( 'success' === $status ? 'retry_success' : 'retry_error' ) ) );
+        exit;
+    }
+
+    public function handle_clear_logs(): void {
+        if ( ! current_user_can( 'manage_options' ) ) { wp_die( esc_html__( 'Access denied.', 'formcourier-notifications-pro' ) ); }
+        check_admin_referer( 'formcourier_notifications_pro_clear_logs' );
+        foreach ( FormCourier_Notifications_Pro_Logger::all() as $log ) {
+            if ( is_array( $log ) && ! empty( $log['id'] ) ) {
+                FormCourier_Notifications_Pro_Retry_Queue::unschedule( (string) $log['id'] );
+            }
+        }
+        FormCourier_Notifications_Pro_Logger::clear();
+        wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs&fct_notice=logs_cleared' ) );
+        exit;
+    }
+}
