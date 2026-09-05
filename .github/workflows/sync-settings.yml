@@ -1,0 +1,38 @@
+name: Sync final 1.8.0 settings
+
+on:
+  push:
+    branches:
+      - sync/1.8.0-settings
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply final settings patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .sync/settings.patch.gz.b64 > /tmp/settings.patch.gz
+          gzip -dc /tmp/settings.patch.gz > /tmp/settings.patch
+          git apply /tmp/settings.patch
+          actual="$(git hash-object includes/core/class-formcourier-notifications-pro-settings.php)"
+          expected="dc14b989fb6721b7482cc1316ae5cfa4426540a2"
+          test "$actual" = "$expected"
+      - name: Commit generated settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .sync
+          rm -f .github/workflows/sync-settings.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Generate final 1.8.0 settings blob"
+          git push origin HEAD:sync/1.8.0-settings
