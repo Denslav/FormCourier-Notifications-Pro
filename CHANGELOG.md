@@ -1,5 +1,28 @@
 # Changelog
+### Added
+- Initial FormCourier Notifications Pro architecture.
+- Universal submission and notification core.
+- Telegram provider.
+- Support for Contact Form 7, WPForms, Fluent Forms, Forminator, Ninja Forms, and Gravity Forms.
+- ## [1.7.0] - 2026-09-05
 
+### Added
+- Slack notification provider using Incoming Webhooks.
+- Multiple encrypted Slack destinations.
+- Default Slack destination.
+- Slack connection testing.
+- Per-form Slack destination routing.
+- Simultaneous Telegram and Slack delivery.
+
+### Changed
+- Delivery logs now support Slack destinations.
+- Manual Retry now supports Slack.
+- Automatic WP-Cron retry now supports temporary Slack network, rate-limit, and 5xx failures.
+- Slack rate limits respect `Retry-After`.
+- Existing message templates and placeholders are reused for Slack as clean plain-text messages.
+
+### Compatibility
+- Existing Telegram settings and routing remain fully supported.
 All notable changes to **FormCourier Notifications Pro** are documented in this file.
 
 ## [1.6.0] - 2026-09-04
@@ -87,27 +110,4 @@ All notable changes to **FormCourier Notifications Pro** are documented in this 
 
 ## [1.0.0] - 2026-08-27
 
-### Added
-- Initial FormCourier Notifications Pro architecture.
-- Universal submission and notification core.
-- Telegram provider.
-- Support for Contact Form 7, WPForms, Fluent Forms, Forminator, Ninja Forms, and Gravity Forms.
-- ## [1.7.0] - 2026-09-05
 
-### Added
-- Slack notification provider using Incoming Webhooks.
-- Multiple encrypted Slack destinations.
-- Default Slack destination.
-- Slack connection testing.
-- Per-form Slack destination routing.
-- Simultaneous Telegram and Slack delivery.
-
-### Changed
-- Delivery logs now support Slack destinations.
-- Manual Retry now supports Slack.
-- Automatic WP-Cron retry now supports temporary Slack network, rate-limit, and 5xx failures.
-- Slack rate limits respect `Retry-After`.
-- Existing message templates and placeholders are reused for Slack as clean plain-text messages.
-
-### Compatibility
-- Existing Telegram settings and routing remain fully supported.
