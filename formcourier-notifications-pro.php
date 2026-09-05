@@ -25,6 +25,7 @@ require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcouri
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-settings.php';
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-form-discovery.php';
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-logger.php';
+require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-log-details-ui.php';
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-message-builder.php';
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-provider-interface.php';
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-routing-engine.php';
@@ -39,6 +40,8 @@ require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/form-providers/class
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/form-providers/class-formcourier-notifications-pro-ninjaforms-provider.php';
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/form-providers/class-formcourier-notifications-pro-gravityforms-provider.php';
 require_once FORMCOURIER_NOTIFICATIONS_PRO_PATH . 'includes/core/class-formcourier-notifications-pro-plugin.php';
+
+FormCourier_Notifications_Pro_Log_Details_UI::init();
 
 register_activation_hook( __FILE__, [ 'FormCourier_Notifications_Pro_Plugin', 'activate' ] );
 
