@@ -160,3 +160,57 @@ document.addEventListener('DOMContentLoaded', function () {
         update();
     });
 });
+
+document.addEventListener('DOMContentLoaded', function () {
+    let container = document.getElementById('fcnp-slack-destinations');
+    let addButton = document.getElementById('fcnp-add-slack-destination');
+    let defaultSelect = document.getElementById('fcnp-slack-default-destination');
+    if (!container || !addButton) { return; }
+
+    let refreshDefaultOptions = function () {
+        if (!defaultSelect) { return; }
+        let selected = defaultSelect.value;
+        defaultSelect.innerHTML = '';
+        container.querySelectorAll('.fct-slack-destination').forEach(function (card) {
+            let id = card.dataset.id;
+            let nameInput = card.querySelector('.fcnp-slack-destination-name');
+            let option = document.createElement('option');
+            option.value = id;
+            option.textContent = nameInput && nameInput.value ? nameInput.value : id;
+            option.selected = id === selected;
+            defaultSelect.appendChild(option);
+        });
+    };
+
+    addButton.addEventListener('click', function () {
+        let id = 'slack-destination-' + Date.now();
+        let prefix = 'formcourier_notifications_pro_settings[slack_destinations][' + id + ']';
+        let card = document.createElement('div');
+        card.className = 'fct-destination fct-slack-destination';
+        card.dataset.id = id;
+        card.innerHTML = '<div class="fct-card-heading"><h3>New Destination</h3><button type="button" class="button-link-delete fcnp-remove-slack-destination">Remove</button></div>' +
+            '<div class="fct-destination-grid">' +
+            '<p><label>Name<br><input class="regular-text fcnp-slack-destination-name" type="text" name="' + prefix + '[name]" value="New Destination"></label></p>' +
+            '<p><label>Incoming Webhook URL<br><input class="regular-text" type="password" autocomplete="new-password" name="' + prefix + '[webhook_url]" value=""></label></p>' +
+            '<p><label><input type="checkbox" name="' + prefix + '[enabled]" value="1" checked> Enabled</label></p>' +
+            '</div>';
+        container.appendChild(card);
+        refreshDefaultOptions();
+    });
+
+    container.addEventListener('click', function (event) {
+        if (!event.target.classList.contains('fcnp-remove-slack-destination')) { return; }
+        let cards = container.querySelectorAll('.fct-slack-destination');
+        if (cards.length <= 1) { return; }
+        event.target.closest('.fct-slack-destination').remove();
+        refreshDefaultOptions();
+    });
+
+    container.addEventListener('input', function (event) {
+        if (!event.target.classList.contains('fcnp-slack-destination-name')) { return; }
+        let card = event.target.closest('.fct-slack-destination');
+        let heading = card ? card.querySelector('h3') : null;
+        if (heading) { heading.textContent = event.target.value || card.dataset.id; }
+        refreshDefaultOptions();
+    });
+});

@@ -1,10 +1,10 @@
 === FormCourier Notifications Pro ===
 Contributors: denslav
-Tags: forms, telegram, notifications, contact form 7, wpforms
+Tags: forms, telegram, slack, notifications, wpforms
 Requires at least: 6.0
 Requires PHP: 7.4
 Tested up to: 6.8
-Stable tag: 1.6.0
+Stable tag: 1.7.0
 License: GPLv2 or later
 
 FormCourier Notifications Pro routes WordPress form submissions to notification providers.
@@ -19,20 +19,30 @@ Supported form integrations:
 * Ninja Forms
 * Gravity Forms
 
-Included notification provider:
+Included notification providers:
 * Telegram
+* Slack (Incoming Webhooks)
 
 The internal architecture separates submission normalization, routing, notification management and notification providers.
 
 == Installation ==
 
 1. Upload and activate FormCourier Notifications Pro.
-2. Open FormCourier Notifications Pro > Telegram and configure one or more destinations.
-3. Open Forms and choose destinations for each form.
+2. Configure Telegram and/or Slack destinations.
+3. Open Forms and choose Telegram and Slack destinations for each form.
 4. Optionally add Conditional Routing rules.
 5. Send test submissions and review Logs.
 
 == Changelog ==
+
+= 1.7.0 =
+* Added Slack as a notification provider using Incoming Webhooks.
+* Added multiple encrypted Slack destinations and a default Slack destination.
+* Added Slack connection testing.
+* Added per-form Slack routing alongside existing Telegram routing.
+* Slack deliveries are recorded in the existing Logs screen with Destination and Attempts.
+* Manual and automatic Retry now support temporary Slack network, rate-limit, and 5xx failures.
+* Slack reuses existing message templates and placeholders as a clean plain-text message.
 
 = 1.6.0 =
 * Added automatic retry queue for temporary Telegram delivery failures.

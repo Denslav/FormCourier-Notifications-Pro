@@ -53,7 +53,9 @@ final class FormCourier_Notifications_Pro_Notification_Manager {
 
             $provider = $this->providers[ $provider_id ];
             $result   = $provider->send( $submission, [ 'destination' => $destination_id ] );
-            $destination = $this->settings->get_destination( $destination_id );
+            $destination = 'slack' === $provider_id
+                ? $this->settings->get_slack_destination( $destination_id )
+                : $this->settings->get_destination( $destination_id );
             $destination_name = (string) ( $destination['name'] ?? $destination_id );
 
             $status = (string) ( $result['status'] ?? 'error' );

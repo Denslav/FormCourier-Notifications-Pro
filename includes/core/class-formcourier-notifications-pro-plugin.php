@@ -31,6 +31,7 @@ final class FormCourier_Notifications_Pro_Plugin {
         $manager  = new FormCourier_Notifications_Pro_Notification_Manager( $settings, $routing );
 
         $manager->register_provider( new FormCourier_Notifications_Pro_Telegram_Provider( $settings ) );
+        $manager->register_provider( new FormCourier_Notifications_Pro_Slack_Provider( $settings ) );
         $settings->init();
 
         $form_providers = [
