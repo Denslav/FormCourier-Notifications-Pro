@@ -19,6 +19,10 @@ final class FormCourier_Notifications_Pro_Settings {
             'default_destination' => '',
             'form_routes'      => [],
             'conditional_rules' => [],
+            'slack_enabled'          => '0',
+            'slack_destinations'     => [],
+            'slack_default_destination' => '',
+            'slack_form_routes'      => [],
             'providers'        => [ 'contact_form_7', 'wpforms', 'fluent_forms', 'forminator', 'ninja_forms', 'gravity_forms' ],
             'message_template'          => "🆕 <b>New form submission</b>\n\n<b>Form:</b> {form_name}\n\n{all_fields}",
             'form_message_templates'    => [],
@@ -31,6 +35,7 @@ final class FormCourier_Notifications_Pro_Settings {
         add_action( 'admin_init', [ $this, 'register' ] );
         add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_admin_assets' ] );
         add_action( 'admin_post_formcourier_notifications_pro_test', [ $this, 'handle_test' ] );
+        add_action( 'admin_post_formcourier_notifications_pro_slack_test', [ $this, 'handle_slack_test' ] );
         add_action( 'admin_post_formcourier_notifications_pro_clear_logs', [ $this, 'handle_clear_logs' ] );
         add_action( 'admin_post_formcourier_notifications_pro_retry_log', [ $this, 'handle_retry_log' ] );
         add_filter( 'plugin_action_links_' . FORMCOURIER_NOTIFICATIONS_PRO_BASENAME, [ $this, 'action_links' ] );
@@ -76,6 +81,57 @@ final class FormCourier_Notifications_Pro_Settings {
             if ( '1' === ( $destination['enabled'] ?? '1' ) ) { return sanitize_key( (string) $id ); }
         }
         return '';
+    }
+
+    public function get_slack_destinations(): array {
+        $destinations = $this->get( 'slack_destinations', [] );
+        return is_array( $destinations ) ? $destinations : [];
+    }
+
+    public function get_slack_destination( string $id ): array {
+        $destinations = $this->get_slack_destinations();
+        return isset( $destinations[ $id ] ) && is_array( $destinations[ $id ] ) ? $destinations[ $id ] : [];
+    }
+
+    public function get_slack_destination_webhook_url( string $id ): string {
+        $destination = $this->get_slack_destination( $id );
+        return FormCourier_Notifications_Pro_Encryption::decrypt( (string) ( $destination['webhook_url'] ?? '' ) );
+    }
+
+    public function get_slack_default_destination_id(): string {
+        $destinations = $this->get_slack_destinations();
+        $default = sanitize_key( (string) $this->get( 'slack_default_destination', '' ) );
+        if ( $default && isset( $destinations[ $default ] ) && '1' === ( $destinations[ $default ]['enabled'] ?? '1' ) ) {
+            return $default;
+        }
+        foreach ( $destinations as $id => $destination ) {
+            if ( '1' === ( $destination['enabled'] ?? '1' ) ) { return sanitize_key( (string) $id ); }
+        }
+        return '';
+    }
+
+    /** @return array<int,string> */
+    public function get_slack_route_destinations( FormCourier_Notifications_Pro_Submission $submission ): array {
+        $routes = $this->get( 'slack_form_routes', [] );
+        $route_key = sanitize_key( $submission->provider_key ) . ':' . sanitize_key( (string) $submission->form_id );
+        $configured = is_array( $routes ) && array_key_exists( $route_key, $routes ) ? $routes[ $route_key ] : [];
+        if ( is_string( $configured ) && '' !== $configured ) { $configured = [ $configured ]; }
+
+        $resolved = [];
+        if ( is_array( $configured ) ) {
+            foreach ( $configured as $destination_id ) {
+                $destination_id = sanitize_key( (string) $destination_id );
+                if ( '' === $destination_id || in_array( $destination_id, $resolved, true ) ) { continue; }
+                $destination = $this->get_slack_destination( $destination_id );
+                if ( ! empty( $destination ) && '1' === ( $destination['enabled'] ?? '1' ) ) { $resolved[] = $destination_id; }
+            }
+        }
+
+        if ( empty( $resolved ) ) {
+            $default = $this->get_slack_default_destination_id();
+            if ( '' !== $default ) { $resolved[] = $default; }
+        }
+        return $resolved;
     }
 
     /** @return array<int,string> */
@@ -269,6 +325,36 @@ final class FormCourier_Notifications_Pro_Settings {
             $clean['default_destination'] = isset( $destinations[ $default ] ) ? $default : ( $destinations ? array_key_first( $destinations ) : '' );
         }
 
+        if ( isset( $input['_section'] ) && 'slack' === $input['_section'] ) {
+            $clean['slack_enabled'] = ! empty( $input['slack_enabled'] ) ? '1' : '0';
+            $old_destinations = isset( $old['slack_destinations'] ) && is_array( $old['slack_destinations'] ) ? $old['slack_destinations'] : [];
+            $destinations = [];
+            if ( isset( $input['slack_destinations'] ) && is_array( $input['slack_destinations'] ) ) {
+                foreach ( $input['slack_destinations'] as $raw_id => $raw_destination ) {
+                    if ( ! is_array( $raw_destination ) ) { continue; }
+                    $id = sanitize_key( (string) $raw_id );
+                    if ( '' === $id ) { continue; }
+                    $name = sanitize_text_field( (string) ( $raw_destination['name'] ?? '' ) );
+                    $webhook = trim( esc_url_raw( (string) ( $raw_destination['webhook_url'] ?? '' ), [ 'https' ] ) );
+                    if ( '' === $name && '' === $webhook && empty( $old_destinations[ $id ]['webhook_url'] ) ) { continue; }
+                    $encrypted = '';
+                    if ( '' !== $webhook ) {
+                        $encrypted = FormCourier_Notifications_Pro_Encryption::encrypt( $webhook );
+                    } elseif ( isset( $old_destinations[ $id ]['webhook_url'] ) ) {
+                        $encrypted = (string) $old_destinations[ $id ]['webhook_url'];
+                    }
+                    $destinations[ $id ] = [
+                        'name'        => $name ?: ucfirst( str_replace( '-', ' ', $id ) ),
+                        'webhook_url' => $encrypted,
+                        'enabled'     => ! empty( $raw_destination['enabled'] ) ? '1' : '0',
+                    ];
+                }
+            }
+            $clean['slack_destinations'] = $destinations;
+            $default = sanitize_key( (string) ( $input['slack_default_destination'] ?? '' ) );
+            $clean['slack_default_destination'] = isset( $destinations[ $default ] ) ? $default : ( $destinations ? array_key_first( $destinations ) : '' );
+        }
+
         if ( isset( $input['_section'] ) && 'forms' === $input['_section'] ) {
             $allowed = [ 'contact_form_7', 'wpforms', 'fluent_forms', 'forminator', 'ninja_forms', 'gravity_forms' ];
             $providers = isset( $input['providers'] ) && is_array( $input['providers'] )
@@ -301,6 +387,25 @@ final class FormCourier_Notifications_Pro_Settings {
                 }
             }
             $clean['form_routes'] = $routes;
+
+            $slack_destinations = $this->get_slack_destinations();
+            $slack_routes = [];
+            if ( isset( $input['slack_form_routes'] ) && is_array( $input['slack_form_routes'] ) ) {
+                foreach ( $input['slack_form_routes'] as $route_key => $destination_ids ) {
+                    $route_key = sanitize_text_field( (string) $route_key );
+                    if ( '' === $route_key ) { continue; }
+                    if ( ! is_array( $destination_ids ) ) { $destination_ids = [ $destination_ids ]; }
+                    $selected = [];
+                    foreach ( $destination_ids as $destination_id ) {
+                        $destination_id = sanitize_key( (string) $destination_id );
+                        if ( '' !== $destination_id && isset( $slack_destinations[ $destination_id ] ) && ! in_array( $destination_id, $selected, true ) ) {
+                            $selected[] = $destination_id;
+                        }
+                    }
+                    if ( ! empty( $selected ) ) { $slack_routes[ $route_key ] = $selected; }
+                }
+            }
+            $clean['slack_form_routes'] = $slack_routes;
             $rules = [];
             if ( isset( $input['conditional_rules'] ) && is_array( $input['conditional_rules'] ) ) {
                 $allowed_operators = [ 'equals', 'not_equals', 'contains', 'not_contains', 'greater_than', 'less_than', 'is_empty', 'is_not_empty' ];
@@ -419,6 +524,7 @@ final class FormCourier_Notifications_Pro_Settings {
         return [
             'dashboard' => __( 'Dashboard', 'formcourier-notifications-pro' ),
             'telegram'  => __( 'Telegram', 'formcourier-notifications-pro' ),
+            'slack'     => __( 'Slack', 'formcourier-notifications-pro' ),
             'forms'     => __( 'Forms', 'formcourier-notifications-pro' ),
             'message'   => __( 'Message', 'formcourier-notifications-pro' ),
             'logs'      => __( 'Logs', 'formcourier-notifications-pro' ),
@@ -453,7 +559,7 @@ final class FormCourier_Notifications_Pro_Settings {
             <div class="fct-header">
                 <div>
                     <h1><?php esc_html_e( 'FormCourier Notifications Pro', 'formcourier-notifications-pro' ); ?></h1>
-                    <p><?php esc_html_e( 'Route WordPress form submissions to notification channels. Telegram is included in version 1.0.0.', 'formcourier-notifications-pro' ); ?></p>
+                    <p><?php esc_html_e( 'Route WordPress form submissions to Telegram and Slack with routing, templates, logs and retries.', 'formcourier-notifications-pro' ); ?></p>
                 </div>
                 <span class="fct-version">v<?php echo esc_html( FORMCOURIER_NOTIFICATIONS_PRO_VERSION ); ?></span>
             </div>
@@ -471,6 +577,9 @@ final class FormCourier_Notifications_Pro_Settings {
                 switch ( $tab ) {
                     case 'telegram':
                         $this->render_telegram_tab();
+                        break;
+                    case 'slack':
+                        $this->render_slack_tab();
                         break;
                     case 'forms':
                         $this->render_forms_tab();
@@ -495,7 +604,7 @@ final class FormCourier_Notifications_Pro_Settings {
         if ( 'test_success' === $notice ) {
             echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Test message sent successfully.', 'formcourier-notifications-pro' ) . '</p></div>';
         } elseif ( 'test_error' === $notice ) {
-            $error = get_transient( 'formcourier_notifications_pro_test_error' ) ?: __( 'Telegram test failed.', 'formcourier-notifications-pro' );
+            $error = get_transient( 'formcourier_notifications_pro_test_error' ) ?: __( 'Notification test failed.', 'formcourier-notifications-pro' );
             echo '<div class="notice notice-error is-dismissible"><p>' . esc_html( $error ) . '</p></div>';
         } elseif ( 'logs_cleared' === $notice ) {
             echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Logs cleared.', 'formcourier-notifications-pro' ) . '</p></div>';
@@ -514,6 +623,12 @@ final class FormCourier_Notifications_Pro_Settings {
         $token_ready = ! empty( $settings['bot_token'] );
         $chat_ready = '' !== trim( (string) $settings['chat_id'] );
         $integration_ready = '1' === $settings['enabled'] && $token_ready && $chat_ready;
+        $slack_destinations = isset( $settings['slack_destinations'] ) && is_array( $settings['slack_destinations'] ) ? $settings['slack_destinations'] : [];
+        $slack_configured = false;
+        foreach ( $slack_destinations as $slack_destination ) {
+            if ( is_array( $slack_destination ) && '1' === ( $slack_destination['enabled'] ?? '1' ) && ! empty( $slack_destination['webhook_url'] ) ) { $slack_configured = true; break; }
+        }
+        $slack_ready = '1' === $settings['slack_enabled'] && $slack_configured;
         $active_forms = 0;
         foreach ( $providers as $provider ) {
             if ( $provider['active'] ) { $active_forms++; }
@@ -523,6 +638,7 @@ final class FormCourier_Notifications_Pro_Settings {
             <?php $this->status_card( __( 'Telegram integration', 'formcourier-notifications-pro' ), $integration_ready ? __( 'Ready', 'formcourier-notifications-pro' ) : __( 'Needs setup', 'formcourier-notifications-pro' ), $integration_ready ); ?>
             <?php $this->status_card( __( 'Bot token', 'formcourier-notifications-pro' ), $token_ready ? __( 'Configured', 'formcourier-notifications-pro' ) : __( 'Not configured', 'formcourier-notifications-pro' ), $token_ready ); ?>
             <?php $this->status_card( __( 'Chat ID', 'formcourier-notifications-pro' ), $chat_ready ? __( 'Configured', 'formcourier-notifications-pro' ) : __( 'Not configured', 'formcourier-notifications-pro' ), $chat_ready ); ?>
+            <?php $this->status_card( __( 'Slack integration', 'formcourier-notifications-pro' ), $slack_ready ? __( 'Ready', 'formcourier-notifications-pro' ) : __( 'Needs setup', 'formcourier-notifications-pro' ), $slack_ready ); ?>
         </div>
 
         <div class="fct-card">
@@ -552,9 +668,10 @@ final class FormCourier_Notifications_Pro_Settings {
         <div class="fct-grid fct-grid-2">
             <div class="fct-card">
                 <h2><?php esc_html_e( 'Quick actions', 'formcourier-notifications-pro' ); ?></h2>
-                <p><?php esc_html_e( 'Configure Telegram, customize the message template or review recent deliveries.', 'formcourier-notifications-pro' ); ?></p>
+                <p><?php esc_html_e( 'Configure Telegram or Slack, customize message templates, or review recent deliveries.', 'formcourier-notifications-pro' ); ?></p>
                 <div class="fct-actions">
                     <a class="button button-primary" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=telegram' ) ); ?>"><?php esc_html_e( 'Telegram Settings', 'formcourier-notifications-pro' ); ?></a>
+                    <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=slack' ) ); ?>"><?php esc_html_e( 'Slack Settings', 'formcourier-notifications-pro' ); ?></a>
                     <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=message' ) ); ?>"><?php esc_html_e( 'Edit Message', 'formcourier-notifications-pro' ); ?></a>
                     <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs' ) ); ?>"><?php esc_html_e( 'View Logs', 'formcourier-notifications-pro' ); ?></a>
                 </div>
@@ -619,13 +736,48 @@ final class FormCourier_Notifications_Pro_Settings {
         <?php
     }
 
+    private function render_slack_tab(): void {
+        $settings = wp_parse_args( get_option( self::OPTION, [] ), self::defaults() );
+        $destinations = $this->get_slack_destinations();
+        if ( empty( $destinations ) ) {
+            $destinations = [ 'sales' => [ 'name' => 'Sales', 'webhook_url' => '', 'enabled' => '1' ] ];
+        }
+        ?>
+        <div class="fct-card fct-card-form">
+            <h2><?php esc_html_e( 'Slack destinations', 'formcourier-notifications-pro' ); ?></h2>
+            <p><?php esc_html_e( 'Create Slack destinations using Incoming Webhook URLs for Sales, Support, HR or other channels.', 'formcourier-notifications-pro' ); ?></p>
+            <form method="post" action="options.php">
+                <?php settings_fields( 'formcourier_notifications_pro_group' ); ?>
+                <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_section]" value="slack">
+                <p><label><input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[slack_enabled]" value="1" <?php checked( $settings['slack_enabled'], '1' ); ?>> <?php esc_html_e( 'Enable Slack notifications', 'formcourier-notifications-pro' ); ?></label></p>
+                <div id="fcnp-slack-destinations">
+                    <?php foreach ( $destinations as $id => $destination ) : ?>
+                        <div class="fct-destination fct-slack-destination" data-id="<?php echo esc_attr( $id ); ?>">
+                            <div class="fct-card-heading"><h3><?php echo esc_html( $destination['name'] ?? $id ); ?></h3><button type="button" class="button-link-delete fcnp-remove-slack-destination"><?php esc_html_e( 'Remove', 'formcourier-notifications-pro' ); ?></button></div>
+                            <div class="fct-destination-grid">
+                                <p><label><?php esc_html_e( 'Name', 'formcourier-notifications-pro' ); ?><br><input class="regular-text fcnp-slack-destination-name" type="text" name="<?php echo esc_attr( self::OPTION ); ?>[slack_destinations][<?php echo esc_attr( $id ); ?>][name]" value="<?php echo esc_attr( $destination['name'] ?? '' ); ?>"></label></p>
+                                <p><label><?php esc_html_e( 'Incoming Webhook URL', 'formcourier-notifications-pro' ); ?><br><input class="regular-text" type="password" autocomplete="new-password" name="<?php echo esc_attr( self::OPTION ); ?>[slack_destinations][<?php echo esc_attr( $id ); ?>][webhook_url]" value="" placeholder="<?php echo ! empty( $destination['webhook_url'] ) ? esc_attr__( 'Saved - enter a new URL to replace it', 'formcourier-notifications-pro' ) : ''; ?>"></label></p>
+                                <p><label><input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[slack_destinations][<?php echo esc_attr( $id ); ?>][enabled]" value="1" <?php checked( $destination['enabled'] ?? '1', '1' ); ?>> <?php esc_html_e( 'Enabled', 'formcourier-notifications-pro' ); ?></label></p>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+                <p><button type="button" class="button" id="fcnp-add-slack-destination"><?php esc_html_e( 'Add Destination', 'formcourier-notifications-pro' ); ?></button></p>
+                <table class="form-table" role="presentation"><tr><th><?php esc_html_e( 'Default destination', 'formcourier-notifications-pro' ); ?></th><td><select name="<?php echo esc_attr( self::OPTION ); ?>[slack_default_destination]" id="fcnp-slack-default-destination"><?php foreach ( $destinations as $id => $destination ) : ?><option value="<?php echo esc_attr( $id ); ?>" <?php selected( $this->get_slack_default_destination_id(), $id ); ?>><?php echo esc_html( $destination['name'] ?? $id ); ?></option><?php endforeach; ?></select><p class="description"><?php esc_html_e( 'Forms without a custom Slack route are sent here.', 'formcourier-notifications-pro' ); ?></p></td></tr></table>
+                <?php submit_button( __( 'Save Slack Destinations', 'formcourier-notifications-pro' ) ); ?>
+            </form>
+        </div>
+        <div class="fct-card"><h2><?php esc_html_e( 'Connection test', 'formcourier-notifications-pro' ); ?></h2><p><?php esc_html_e( 'Choose a saved Slack destination and send a test message.', 'formcourier-notifications-pro' ); ?></p><form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"><input type="hidden" name="action" value="formcourier_notifications_pro_slack_test"><?php wp_nonce_field( 'formcourier_notifications_pro_slack_test' ); ?><select name="destination_id"><?php foreach ( $this->get_slack_destinations() as $id => $destination ) : ?><option value="<?php echo esc_attr( $id ); ?>"><?php echo esc_html( $destination['name'] ?? $id ); ?></option><?php endforeach; ?></select> <?php submit_button( __( 'Send Test Message', 'formcourier-notifications-pro' ), 'secondary', 'submit', false ); ?></form></div>
+        <?php
+    }
+
     private function render_forms_tab(): void {
         $settings = wp_parse_args( get_option( self::OPTION, [] ), self::defaults() );
         $providers = $this->providers();
         ?>
         <div class="fct-card fct-card-form">
             <h2><?php esc_html_e( 'Form providers', 'formcourier-notifications-pro' ); ?></h2>
-            <p><?php esc_html_e( 'Choose which supported form plugins are allowed to send submissions to Telegram.', 'formcourier-notifications-pro' ); ?></p>
+            <p><?php esc_html_e( 'Choose which supported form plugins are allowed to send submissions to notification channels.', 'formcourier-notifications-pro' ); ?></p>
             <form method="post" action="options.php">
                 <?php settings_fields( 'formcourier_notifications_pro_group' ); ?>
                 <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_section]" value="forms">
@@ -638,7 +790,7 @@ final class FormCourier_Notifications_Pro_Settings {
                         </label>
                     <?php endforeach; ?>
                 </div>
-                <?php $known_forms = FormCourier_Notifications_Pro_Form_Discovery::all(); $destinations = $this->get_destinations(); ?>
+                <?php $known_forms = FormCourier_Notifications_Pro_Form_Discovery::all(); $destinations = $this->get_destinations(); $slack_destinations = $this->get_slack_destinations(); ?>
                 <?php if ( ! empty( $known_forms ) && ! empty( $destinations ) ) : ?>
                     <hr>
                     <h2><?php esc_html_e( 'Form routing', 'formcourier-notifications-pro' ); ?></h2>
@@ -673,11 +825,36 @@ final class FormCourier_Notifications_Pro_Settings {
                 <?php else : ?>
                     <hr><h2><?php esc_html_e( 'Form routing', 'formcourier-notifications-pro' ); ?></h2><p class="fct-muted"><?php esc_html_e( 'No forms were found in the active supported form plugins.', 'formcourier-notifications-pro' ); ?></p>
                 <?php endif; ?>
+                <?php if ( ! empty( $known_forms ) && ! empty( $slack_destinations ) ) : ?>
+                    <hr>
+                    <h2><?php esc_html_e( 'Slack form routing', 'formcourier-notifications-pro' ); ?></h2>
+                    <p><?php esc_html_e( 'Choose one or more Slack destinations for each form. If none are selected, the form uses the default Slack destination.', 'formcourier-notifications-pro' ); ?></p>
+                    <table class="widefat striped fct-routing-table">
+                        <thead><tr><th><?php esc_html_e( 'Provider', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Form', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Slack destinations', 'formcourier-notifications-pro' ); ?></th></tr></thead>
+                        <tbody>
+                        <?php foreach ( $known_forms as $route_key => $form ) :
+                            $saved_slack_route = $settings['slack_form_routes'][ $route_key ] ?? [];
+                            if ( is_string( $saved_slack_route ) && '' !== $saved_slack_route ) { $saved_slack_route = [ $saved_slack_route ]; }
+                            $saved_slack_route = is_array( $saved_slack_route ) ? array_map( 'sanitize_key', $saved_slack_route ) : [];
+                            ?>
+                            <tr>
+                                <td><?php echo esc_html( $form['provider_label'] ?? '' ); ?></td>
+                                <td><?php echo esc_html( ( $form['form_name'] ?? '' ) . ' (#' . ( $form['form_id'] ?? '' ) . ')' ); ?></td>
+                                <td><div class="fct-route-destinations">
+                                    <?php foreach ( $slack_destinations as $destination_id => $destination ) : ?>
+                                        <label class="fct-route-option"><input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[slack_form_routes][<?php echo esc_attr( $route_key ); ?>][]" value="<?php echo esc_attr( $destination_id ); ?>" <?php checked( in_array( $destination_id, $saved_slack_route, true ) ); ?>><span><?php echo esc_html( $destination['name'] ?? $destination_id ); ?></span><?php if ( $destination_id === $this->get_slack_default_destination_id() ) : ?><small><?php esc_html_e( 'Default', 'formcourier-notifications-pro' ); ?></small><?php endif; ?></label>
+                                    <?php endforeach; ?>
+                                </div><p class="description"><?php esc_html_e( 'No selection = use the default Slack destination.', 'formcourier-notifications-pro' ); ?></p></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
                 <?php if ( ! empty( $known_forms ) && ! empty( $destinations ) ) : ?>
                     <hr>
                     <div class="fct-card-heading fct-rules-heading">
                         <div>
-                            <h2><?php esc_html_e( 'Conditional routing', 'formcourier-notifications-pro' ); ?></h2>
+                            <h2><?php esc_html_e( 'Telegram conditional routing', 'formcourier-notifications-pro' ); ?></h2>
                             <p><?php esc_html_e( 'Send a submission to different destinations when a field matches a condition.', 'formcourier-notifications-pro' ); ?></p>
                         </div>
                         <button type="button" class="button" id="fcnp-add-rule"><?php esc_html_e( 'Add Rule', 'formcourier-notifications-pro' ); ?></button>
@@ -752,7 +929,7 @@ final class FormCourier_Notifications_Pro_Settings {
                     <h2><?php esc_html_e( 'Default message template', 'formcourier-notifications-pro' ); ?></h2>
                     <p><?php esc_html_e( 'This template is used by every form that does not have its own custom template.', 'formcourier-notifications-pro' ); ?></p>
                     <textarea id="fct-template" class="large-text code fct-template" rows="14" name="<?php echo esc_attr( self::OPTION ); ?>[message_template]"><?php echo esc_textarea( $settings['message_template'] ); ?></textarea>
-                    <p class="description"><?php esc_html_e( 'Telegram HTML is supported: <b>, <strong>, <i>, <em>, <u>, <s>, <code>, <pre> and <a>.', 'formcourier-notifications-pro' ); ?></p>
+                    <p class="description"><?php esc_html_e( 'Telegram HTML is supported. Slack receives a clean plain-text version of the same template.', 'formcourier-notifications-pro' ); ?></p>
                 </div>
                 <div class="fct-card">
                     <h2><?php esc_html_e( 'Global placeholders', 'formcourier-notifications-pro' ); ?></h2>
@@ -780,7 +957,7 @@ final class FormCourier_Notifications_Pro_Settings {
                 <div class="fct-card-heading">
                     <div>
                         <h2><?php esc_html_e( 'Form-specific templates', 'formcourier-notifications-pro' ); ?></h2>
-                        <p><?php esc_html_e( 'Enable a custom template only for forms that need a different Telegram message.', 'formcourier-notifications-pro' ); ?></p>
+                        <p><?php esc_html_e( 'Enable a custom template only for forms that need a different notification message.', 'formcourier-notifications-pro' ); ?></p>
                     </div>
                 </div>
 
@@ -832,7 +1009,7 @@ final class FormCourier_Notifications_Pro_Settings {
         ?>
         <div class="fct-card">
             <div class="fct-card-heading">
-                <div><h2><?php esc_html_e( 'Recent logs', 'formcourier-notifications-pro' ); ?></h2><p><?php esc_html_e( 'The latest 100 Telegram delivery attempts are stored locally.', 'formcourier-notifications-pro' ); ?></p></div>
+                <div><h2><?php esc_html_e( 'Recent logs', 'formcourier-notifications-pro' ); ?></h2><p><?php esc_html_e( 'The latest 100 notification delivery attempts are stored locally.', 'formcourier-notifications-pro' ); ?></p></div>
                 <?php if ( ! empty( $logs ) ) : ?>
                     <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
                         <input type="hidden" name="action" value="formcourier_notifications_pro_clear_logs">
@@ -900,6 +1077,19 @@ final class FormCourier_Notifications_Pro_Settings {
         exit;
     }
 
+    public function handle_slack_test(): void {
+        if ( ! current_user_can( 'manage_options' ) ) { wp_die( esc_html__( 'Access denied.', 'formcourier-notifications-pro' ) ); }
+        check_admin_referer( 'formcourier_notifications_pro_slack_test' );
+        $provider = new FormCourier_Notifications_Pro_Slack_Provider( new self() );
+        $destination_id = isset( $_POST['destination_id'] ) ? sanitize_key( wp_unslash( $_POST['destination_id'] ) ) : '';
+        $result = $provider->send_test( $destination_id );
+        if ( 'success' !== ( $result['status'] ?? '' ) ) {
+            set_transient( 'formcourier_notifications_pro_test_error', $result['message'] ?? 'Unknown error', 60 );
+        }
+        wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=slack&fct_notice=' . ( 'success' === ( $result['status'] ?? '' ) ? 'test_success' : 'test_error' ) ) );
+        exit;
+    }
+
     public function handle_retry_log(): void {
         if ( ! current_user_can( 'manage_options' ) ) { wp_die( esc_html__( 'Access denied.', 'formcourier-notifications-pro' ) ); }
 
@@ -913,7 +1103,7 @@ final class FormCourier_Notifications_Pro_Settings {
         $log = FormCourier_Notifications_Pro_Logger::get( $log_id );
         $payload = isset( $log['retry_payload'] ) && is_array( $log['retry_payload'] ) ? $log['retry_payload'] : [];
 
-        if ( empty( $log ) || empty( $payload ) || 'telegram' !== sanitize_key( (string) ( $log['channel_id'] ?? '' ) ) ) {
+        if ( empty( $log ) || empty( $payload ) || ! in_array( sanitize_key( (string) ( $log['channel_id'] ?? '' ) ), [ 'telegram', 'slack' ], true ) ) {
             set_transient( 'formcourier_notifications_pro_retry_error', __( 'This log entry cannot be retried.', 'formcourier-notifications-pro' ), 60 );
             wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs&fct_notice=retry_error' ) );
             exit;
