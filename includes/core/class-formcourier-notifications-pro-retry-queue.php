@@ -37,7 +37,7 @@ final class FormCourier_Notifications_Pro_Retry_Queue {
             return false;
         }
 
-        // Telegram may explicitly request a longer pause after a 429 response.
+        // Providers may explicitly request a longer pause, for example after HTTP 429.
         $provider_retry_after = absint( $result['retry_after'] ?? 0 );
         if ( $provider_retry_after > $delay ) {
             $delay = $provider_retry_after;
@@ -84,8 +84,9 @@ final class FormCourier_Notifications_Pro_Retry_Queue {
         $log_id = sanitize_text_field( $log_id );
         $log = FormCourier_Notifications_Pro_Logger::get( $log_id );
         $payload = isset( $log['retry_payload'] ) && is_array( $log['retry_payload'] ) ? $log['retry_payload'] : [];
+        $channel_id = sanitize_key( (string) ( $log['channel_id'] ?? '' ) );
 
-        if ( empty( $log ) || empty( $payload ) || 'telegram' !== sanitize_key( (string) ( $log['channel_id'] ?? '' ) ) ) {
+        if ( empty( $log ) || empty( $payload ) || ! in_array( $channel_id, [ 'telegram', 'slack' ], true ) ) {
             return [
                 'status'    => 'error',
                 'message'   => 'This log entry cannot be retried.',
@@ -115,7 +116,13 @@ final class FormCourier_Notifications_Pro_Retry_Queue {
 
         $destination_id = sanitize_key( (string) ( $log['destination_id'] ?? '' ) );
         $settings = new FormCourier_Notifications_Pro_Settings();
-        $provider = new FormCourier_Notifications_Pro_Telegram_Provider( $settings );
+
+        if ( 'slack' === $channel_id ) {
+            $provider = new FormCourier_Notifications_Pro_Slack_Provider( $settings );
+        } else {
+            $provider = new FormCourier_Notifications_Pro_Telegram_Provider( $settings );
+        }
+
         $result = $provider->send( $submission, [ 'destination' => $destination_id ] );
 
         $status = (string) ( $result['status'] ?? 'error' );
