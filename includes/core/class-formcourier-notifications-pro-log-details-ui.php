@@ -24,11 +24,15 @@ final class FormCourier_Notifications_Pro_Log_Details_UI {
         $diagnostics = [];
         foreach ( FormCourier_Notifications_Pro_Logger::all() as $log ) {
             if ( ! is_array( $log ) ) {
-                $diagnostics[] = [];
                 continue;
             }
 
-            $diagnostics[] = [
+            $log_id = sanitize_text_field( (string) ( $log['id'] ?? '' ) );
+            if ( '' === $log_id ) {
+                continue;
+            }
+
+            $diagnostics[ $log_id ] = [
                 'http_status'       => absint( $log['http_status'] ?? 0 ),
                 'last_error'        => sanitize_text_field( (string) ( $log['last_error'] ?? '' ) ),
                 'provider_response' => sanitize_text_field( (string) ( $log['provider_response'] ?? '' ) ),
@@ -53,8 +57,9 @@ final class FormCourier_Notifications_Pro_Log_Details_UI {
             let diagnostics = <?php echo wp_json_encode( $diagnostics ); ?>;
             let rows = document.querySelectorAll('.fct-logs-table tbody tr');
 
-            rows.forEach(function (row, index) {
-                let data = diagnostics[index] || {};
+            rows.forEach(function (row) {
+                let logId = row.dataset.logId || '';
+                let data = diagnostics[logId] || {};
                 let cell = row.cells && row.cells.length > 7 ? row.cells[7] : null;
                 if (!cell || cell.querySelector('.fcnp-delivery-details')) {
                     return;

@@ -62,5 +62,37 @@ final class FormCourier_Notifications_Pro_Logger {
         return $updated;
     }
 
+    public static function prune_older_than_days( int $days ): int {
+        $days = max( 1, $days );
+        $cutoff = current_datetime()->modify( '-' . $days . ' days' )->getTimestamp();
+        $logs = self::all();
+        $kept = [];
+        $removed = 0;
+
+        foreach ( $logs as $entry ) {
+            if ( ! is_array( $entry ) ) {
+                continue;
+            }
+
+            $time = sanitize_text_field( (string) ( $entry['time'] ?? '' ) );
+            $date = DateTimeImmutable::createFromFormat( 'Y-m-d H:i:s', $time, wp_timezone() );
+            if ( false !== $date && $date->getTimestamp() < $cutoff ) {
+                if ( ! empty( $entry['id'] ) ) {
+                    FormCourier_Notifications_Pro_Retry_Queue::unschedule( (string) $entry['id'] );
+                }
+                $removed++;
+                continue;
+            }
+
+            $kept[] = $entry;
+        }
+
+        if ( $removed > 0 ) {
+            update_option( self::OPTION, array_slice( $kept, 0, 100 ), false );
+        }
+
+        return $removed;
+    }
+
     public static function clear(): void { delete_option( self::OPTION ); }
 }

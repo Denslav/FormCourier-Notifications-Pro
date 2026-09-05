@@ -25,6 +25,7 @@ final class FormCourier_Notifications_Pro_Plugin {
         $this->initialized = true;
 
         FormCourier_Notifications_Pro_Retry_Queue::init();
+        FormCourier_Notifications_Pro_Log_Cleanup::init();
 
         $settings = new FormCourier_Notifications_Pro_Settings();
         $routing  = new FormCourier_Notifications_Pro_Routing_Engine( $settings );
