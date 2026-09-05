@@ -17,24 +17,10 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
     }
 
     public function send( FormCourier_Notifications_Pro_Submission $submission, array $context = [] ): array {
-        $destination_id = sanitize_key( (string) ( $context['destination'] ?? '' ) );
-        if ( '' === $destination_id && method_exists( $this->settings, 'get_slack_default_destination_id' ) ) {
-            $destination_id = sanitize_key( (string) $this->settings->get_slack_default_destination_id() );
-        }
+        $destination_id = sanitize_key( (string) ( $context['destination'] ?? $this->settings->get_slack_default_destination_id() ) );
+        $destination = $this->settings->get_slack_destination( $destination_id );
+        $webhook_url = $this->settings->get_slack_destination_webhook_url( $destination_id );
 
-        $destination = method_exists( $this->settings, 'get_slack_destination' )
-            ? $this->settings->get_slack_destination( $destination_id )
-            : [];
-
-        if ( empty( $destination ) || '1' !== ( $destination['enabled'] ?? '1' ) ) {
-            return [
-                'status'    => 'error',
-                'message'   => 'Slack destination is missing or disabled.',
-                'retryable' => false,
-            ];
-        }
-
-        $webhook_url = trim( (string) ( $destination['webhook_url'] ?? '' ) );
         if ( '' === $webhook_url ) {
             return [
                 'status'    => 'error',
@@ -43,10 +29,10 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
             ];
         }
 
-        if ( ! wp_http_validate_url( $webhook_url ) || 0 !== strpos( $webhook_url, 'https://hooks.slack.com/' ) ) {
+        if ( 0 !== strpos( $webhook_url, 'https://' ) ) {
             return [
                 'status'    => 'error',
-                'message'   => 'Slack Incoming Webhook URL is invalid.',
+                'message'   => 'Slack Incoming Webhook URL must use HTTPS.',
                 'retryable' => false,
             ];
         }
@@ -61,76 +47,13 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
             ]
         );
 
-        $plain_message = $this->to_slack_text( $message );
+        // Message templates are shared with Telegram. Convert the safe HTML
+        // representation to readable plain text before sending it to Slack.
+        $message = wp_strip_all_tags( $message );
+        $message = html_entity_decode( $message, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+        $message = trim( preg_replace( "/\r\n?|\r/", "\n", (string) $message ) );
 
-        // Temporary QA switch for validating the common retry queue.
-        // Define FORMCOURIER_NOTIFICATIONS_PRO_SLACK_SIMULATE_FAILURE as true in wp-config.php,
-        // submit one form, then set it back to false before the scheduled retry runs.
-        if ( defined( 'FORMCOURIER_NOTIFICATIONS_PRO_SLACK_SIMULATE_FAILURE' ) && FORMCOURIER_NOTIFICATIONS_PRO_SLACK_SIMULATE_FAILURE ) {
-            return [
-                'status'      => 'error',
-                'message'     => 'Simulated temporary Slack network error for retry testing.',
-                'retryable'   => true,
-                'retry_after' => 0,
-            ];
-        }
-
-        $response = wp_remote_post(
-            $webhook_url,
-            [
-                'timeout'            => 15,
-                'redirection'        => 0,
-                'reject_unsafe_urls' => true,
-                'headers'            => [ 'Content-Type' => 'application/json; charset=utf-8' ],
-                'body'               => wp_json_encode( [ 'text' => $plain_message ] ),
-            ]
-        );
-
-        if ( is_wp_error( $response ) ) {
-            return [
-                'status'    => 'error',
-                'message'   => 'Slack network error: ' . sanitize_text_field( $response->get_error_message() ),
-                'retryable' => true,
-            ];
-        }
-
-        $code = (int) wp_remote_retrieve_response_code( $response );
-        $body = trim( (string) wp_remote_retrieve_body( $response ) );
-
-        if ( $code >= 200 && $code < 300 && 'ok' === strtolower( $body ) ) {
-            return [
-                'status'  => 'success',
-                'message' => 'Slack message sent successfully.',
-            ];
-        }
-
-        $retry_after = absint( wp_remote_retrieve_header( $response, 'retry-after' ) );
-        $retryable   = ( 429 === $code || $code >= 500 );
-
-        if ( 429 === $code ) {
-            $message = 'Slack rate limit reached.';
-        } elseif ( $code >= 500 ) {
-            $message = 'Slack is temporarily unavailable.';
-        } elseif ( in_array( $code, [ 400, 403, 404, 410 ], true ) ) {
-            $message = 'Slack webhook rejected the request. Check the Incoming Webhook URL and channel access.';
-        } else {
-            $message = 'Slack API request failed' . ( $code ? ' with HTTP ' . $code : '' ) . '.';
-        }
-
-        if ( '' !== $body && 'ok' !== strtolower( $body ) ) {
-            $message .= ' ' . sanitize_text_field( $body );
-        }
-        if ( $retry_after > 0 ) {
-            $message .= ' Retry after ' . $retry_after . ' seconds.';
-        }
-
-        return [
-            'status'      => 'error',
-            'message'     => $message,
-            'error_code'  => $code,
-            'retryable'   => $retryable,
-            'retry_after' => $retry_after,
-        ];
+        return $this->request( $webhook_url, $message );
     }
 
     public function send_test( string $destination_id = '' ): array {
@@ -147,19 +70,69 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
             ]
         );
 
-        return $this->send( $submission, [ 'destination' => $destination_id ] );
+        return $this->send(
+            $submission,
+            [ 'destination' => $destination_id ?: $this->settings->get_slack_default_destination_id() ]
+        );
     }
 
-    private function to_slack_text( string $message ): string {
-        $message = str_replace( [ '<br>', '<br/>', '<br />' ], "\n", $message );
-        $message = preg_replace( '#</p>\s*#i', "\n\n", $message );
-        $message = preg_replace( '#</div>\s*#i', "\n", $message );
-        $message = preg_replace( '#<b>(.*?)</b>#is', '*$1*', $message );
-        $message = preg_replace( '#<strong>(.*?)</strong>#is', '*$1*', $message );
-        $message = preg_replace( '#<i>(.*?)</i>#is', '_$1_', $message );
-        $message = preg_replace( '#<em>(.*?)</em>#is', '_$1_', $message );
-        $message = wp_strip_all_tags( $message );
-        $message = html_entity_decode( $message, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-        return trim( (string) preg_replace( "/\n{3,}/", "\n\n", $message ) );
+    private function request( string $webhook_url, string $message ): array {
+        $response = wp_remote_post(
+            $webhook_url,
+            [
+                'timeout'            => 15,
+                'redirection'        => 0,
+                'reject_unsafe_urls' => true,
+                'headers'            => [ 'Content-Type' => 'application/json; charset=utf-8' ],
+                'body'               => wp_json_encode( [ 'text' => $message ] ),
+            ]
+        );
+
+        if ( is_wp_error( $response ) ) {
+            return [
+                'status'    => 'error',
+                'message'   => 'Slack network error: ' . sanitize_text_field( $response->get_error_message() ),
+                'retryable' => true,
+            ];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $response );
+        $body = trim( (string) wp_remote_retrieve_body( $response ) );
+
+        if ( $code >= 200 && $code < 300 && 'ok' === strtolower( $body ) ) {
+            return [ 'status' => 'success', 'message' => 'Slack message sent successfully.' ];
+        }
+
+        $retry_after = absint( wp_remote_retrieve_header( $response, 'retry-after' ) );
+        $retryable = ( 429 === $code || $code >= 500 );
+
+        if ( 400 === $code ) {
+            $friendly = 'Slack rejected the webhook request. Check the destination configuration.';
+        } elseif ( 403 === $code ) {
+            $friendly = 'Slack access denied for this webhook.';
+        } elseif ( 404 === $code || 410 === $code ) {
+            $friendly = 'Slack webhook was not found or has been disabled.';
+        } elseif ( 429 === $code ) {
+            $friendly = 'Slack rate limit reached.';
+        } elseif ( $code >= 500 ) {
+            $friendly = 'Slack is temporarily unavailable.';
+        } else {
+            $friendly = 'Slack webhook error' . ( $code ? ' ' . $code : '' ) . '.';
+        }
+
+        if ( '' !== $body && 'ok' !== strtolower( $body ) ) {
+            $friendly .= ' ' . sanitize_text_field( $body );
+        }
+        if ( $retry_after > 0 ) {
+            $friendly .= ' Retry after ' . $retry_after . ' seconds.';
+        }
+
+        return [
+            'status'      => 'error',
+            'message'     => $friendly,
+            'error_code'  => $code,
+            'retryable'   => $retryable,
+            'retry_after' => $retry_after,
+        ];
     }
 }
