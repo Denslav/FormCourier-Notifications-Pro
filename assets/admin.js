@@ -1,235 +1,216 @@
 document.addEventListener('DOMContentLoaded', function () {
-    const settings = document.querySelector('.formcourier-notifications-pro-settings');
-    if (!settings) {
-        return;
-    }
+    let container = document.getElementById('fcnp-destinations');
+    let addButton = document.getElementById('fcnp-add-destination');
+    let defaultSelect = document.getElementById('fcnp-default-destination');
+    if (!container || !addButton) { return; }
 
-    const destinationsContainer = document.getElementById('formcourier-destinations');
-    const addDestinationButton = document.getElementById('formcourier-add-destination');
-    const defaultDestinationSelect = document.getElementById('formcourier-default-destination');
-
-    function slugify(value) {
-        return String(value || '')
-            .toLowerCase()
-            .trim()
-            .replace(/[^a-z0-9_-]+/g, '-')
-            .replace(/^-+|-+$/g, '') || ('destination-' + Date.now());
-    }
-
-    function updateDefaultDestinationOptions() {
-        if (!destinationsContainer || !defaultDestinationSelect) {
-            return;
-        }
-
-        const current = defaultDestinationSelect.value;
-        const cards = destinationsContainer.querySelectorAll('.formcourier-destination-card');
-        defaultDestinationSelect.innerHTML = '';
-
-        cards.forEach(function (card) {
-            const id = card.dataset.destinationId || '';
-            const nameInput = card.querySelector('.formcourier-destination-name');
-            const enabledInput = card.querySelector('.formcourier-destination-enabled');
-            if (!id || !nameInput || (enabledInput && !enabledInput.checked)) {
-                return;
-            }
-            const option = document.createElement('option');
+    let refreshDefaultOptions = function () {
+        if (!defaultSelect) { return; }
+        let selected = defaultSelect.value;
+        defaultSelect.innerHTML = '';
+        container.querySelectorAll('.fct-destination').forEach(function (card) {
+            let id = card.dataset.id;
+            let nameInput = card.querySelector('.fcnp-destination-name');
+            let option = document.createElement('option');
             option.value = id;
-            option.textContent = nameInput.value || id;
-            defaultDestinationSelect.appendChild(option);
+            option.textContent = nameInput && nameInput.value ? nameInput.value : id;
+            option.selected = id === selected;
+            defaultSelect.appendChild(option);
         });
+    };
 
-        if (Array.from(defaultDestinationSelect.options).some(function (option) { return option.value === current; })) {
-            defaultDestinationSelect.value = current;
+    addButton.addEventListener('click', function () {
+        let id = 'destination-' + Date.now();
+        let prefix = 'formcourier_notifications_pro_settings[destinations][' + id + ']';
+        let card = document.createElement('div');
+        card.className = 'fct-destination';
+        card.dataset.id = id;
+        card.innerHTML = '<div class="fct-card-heading"><h3>New Destination</h3><button type="button" class="button-link-delete fcnp-remove-destination">Remove</button></div>' +
+            '<div class="fct-destination-grid">' +
+            '<p><label>Name<br><input class="regular-text fcnp-destination-name" type="text" name="' + prefix + '[name]" value="New Destination"></label></p>' +
+            '<p><label>Bot Token<br><input class="regular-text" type="password" autocomplete="new-password" name="' + prefix + '[bot_token]" value=""></label></p>' +
+            '<p><label>Chat ID<br><input class="regular-text" type="text" name="' + prefix + '[chat_id]" value=""></label></p>' +
+            '<p><label><input type="checkbox" name="' + prefix + '[enabled]" value="1" checked> Enabled</label></p>' +
+            '</div>';
+        container.appendChild(card);
+        refreshDefaultOptions();
+    });
+
+    container.addEventListener('click', function (event) {
+        if (!event.target.classList.contains('fcnp-remove-destination')) { return; }
+        let cards = container.querySelectorAll('.fct-destination');
+        if (cards.length <= 1) { return; }
+        event.target.closest('.fct-destination').remove();
+        refreshDefaultOptions();
+    });
+
+    container.addEventListener('input', function (event) {
+        if (event.target.classList.contains('fcnp-destination-name')) {
+            let card = event.target.closest('.fct-destination');
+            let heading = card.querySelector('h3');
+            heading.textContent = event.target.value || card.dataset.id;
+            refreshDefaultOptions();
         }
-    }
+    });
+});
 
-    if (addDestinationButton && destinationsContainer) {
-        addDestinationButton.addEventListener('click', function () {
-            let id = slugify('destination-' + Date.now());
-            const card = document.createElement('div');
-            card.className = 'formcourier-destination-card';
-            card.dataset.destinationId = id;
-            card.innerHTML = '<div class="formcourier-destination-card__header"><strong>New Destination</strong><button type="button" class="button-link-delete formcourier-remove-destination">Remove</button></div>' +
-                '<div class="formcourier-grid formcourier-grid--2">' +
-                '<label><span>Name</span><input type="text" class="regular-text formcourier-destination-name" name="formcourier_notifications_pro_settings[destinations][' + id + '][name]" value="New Destination"></label>' +
-                '<label><span>Bot Token</span><input type="password" class="regular-text" name="formcourier_notifications_pro_settings[destinations][' + id + '][bot_token]" value="" autocomplete="new-password" placeholder="Enter bot token"></label>' +
-                '<label><span>Chat ID</span><input type="text" class="regular-text" name="formcourier_notifications_pro_settings[destinations][' + id + '][chat_id]" value=""></label>' +
-                '</div>' +
-                '<label class="formcourier-checkbox"><input type="checkbox" class="formcourier-destination-enabled" name="formcourier_notifications_pro_settings[destinations][' + id + '][enabled]" value="1" checked> Enabled</label>';
-            destinationsContainer.appendChild(card);
-            updateDefaultDestinationOptions();
+document.addEventListener('DOMContentLoaded', function () {
+    let rules = document.getElementById('fcnp-rules');
+    let addRule = document.getElementById('fcnp-add-rule');
+    let template = document.getElementById('fcnp-rule-template');
+    if (!rules || !addRule || !template) { return; }
+
+    let updateValueVisibility = function (row) {
+        let operator = row.querySelector('.fcnp-rule-operator');
+        let valueWrap = row.querySelector('.fcnp-rule-value-wrap');
+        if (!operator || !valueWrap) { return; }
+        let hide = operator.value === 'is_empty' || operator.value === 'is_not_empty';
+        valueWrap.style.display = hide ? 'none' : '';
+    };
+
+    let updateFieldOptions = function (row, preserveSelected) {
+        let formSelect = row.querySelector('.fcnp-rule-form');
+        let fieldSelect = row.querySelector('.fcnp-rule-field');
+        if (!formSelect || !fieldSelect) { return; }
+
+        let data = window.FormCourierNotificationsProAdmin || {};
+        let fieldMap = data.formFields || {};
+        let fields = fieldMap[formSelect.value] || {};
+        let selected = preserveSelected ? (fieldSelect.value || fieldSelect.dataset.selected || '') : '';
+
+        fieldSelect.innerHTML = '';
+        let empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = data.fieldPlaceholder || 'Select a field';
+        fieldSelect.appendChild(empty);
+
+        Object.keys(fields).forEach(function (key) {
+            let option = document.createElement('option');
+            option.value = key;
+            option.textContent = fields[key] + ' (' + key + ')';
+            if (key === selected) { option.selected = true; }
+            fieldSelect.appendChild(option);
         });
 
-        destinationsContainer.addEventListener('click', function (event) {
-            const button = event.target.closest('.formcourier-remove-destination');
-            if (!button) {
-                return;
-            }
-            const card = button.closest('.formcourier-destination-card');
-            if (card) {
-                card.remove();
-                updateDefaultDestinationOptions();
-            }
-        });
-
-        destinationsContainer.addEventListener('input', function (event) {
-            if (event.target.matches('.formcourier-destination-name')) {
-                const card = event.target.closest('.formcourier-destination-card');
-                const strong = card ? card.querySelector('.formcourier-destination-card__header strong') : null;
-                if (strong) {
-                    strong.textContent = event.target.value || 'Destination';
-                }
-                updateDefaultDestinationOptions();
-            }
-        });
-
-        destinationsContainer.addEventListener('change', function (event) {
-            if (event.target.matches('.formcourier-destination-enabled')) {
-                updateDefaultDestinationOptions();
-            }
-        });
-    }
-
-    const slackDestinationsContainer = document.getElementById('formcourier-slack-destinations');
-    const addSlackDestinationButton = document.getElementById('formcourier-add-slack-destination');
-    const defaultSlackDestinationSelect = document.getElementById('formcourier-slack-default-destination');
-
-    function updateDefaultSlackDestinationOptions() {
-        if (!slackDestinationsContainer || !defaultSlackDestinationSelect) {
-            return;
+        if (selected && !Object.prototype.hasOwnProperty.call(fields, selected)) {
+            let custom = document.createElement('option');
+            custom.value = selected;
+            custom.textContent = selected + ' - ' + (data.customFieldLabel || 'Custom / previously saved field');
+            custom.selected = true;
+            fieldSelect.appendChild(custom);
         }
-        const current = defaultSlackDestinationSelect.value;
-        const cards = slackDestinationsContainer.querySelectorAll('.formcourier-slack-destination-card');
-        defaultSlackDestinationSelect.innerHTML = '';
-        cards.forEach(function (card) {
-            const id = card.dataset.destinationId || '';
-            const nameInput = card.querySelector('.formcourier-slack-destination-name');
-            const enabledInput = card.querySelector('.formcourier-slack-destination-enabled');
-            if (!id || !nameInput || (enabledInput && !enabledInput.checked)) {
-                return;
-            }
-            const option = document.createElement('option');
+
+        fieldSelect.dataset.selected = fieldSelect.value;
+    };
+
+    rules.querySelectorAll('.fct-rule-row').forEach(function (row) {
+        updateValueVisibility(row);
+        updateFieldOptions(row, true);
+    });
+
+    addRule.addEventListener('click', function () {
+        let index = Date.now().toString();
+        let html = template.innerHTML.replaceAll('__INDEX__', index);
+        let wrapper = document.createElement('div');
+        wrapper.innerHTML = html.trim();
+        let row = wrapper.firstElementChild;
+        if (!row) { return; }
+        rules.appendChild(row);
+        updateValueVisibility(row);
+        updateFieldOptions(row, false);
+    });
+
+    rules.addEventListener('click', function (event) {
+        if (!event.target.classList.contains('fcnp-remove-rule')) { return; }
+        let row = event.target.closest('.fct-rule-row');
+        if (row) { row.remove(); }
+    });
+
+    rules.addEventListener('change', function (event) {
+        let row = event.target.closest('.fct-rule-row');
+        if (!row) { return; }
+        if (event.target.classList.contains('fcnp-rule-operator')) {
+            updateValueVisibility(row);
+        }
+        if (event.target.classList.contains('fcnp-rule-form')) {
+            updateFieldOptions(row, false);
+        }
+        if (event.target.classList.contains('fcnp-rule-field')) {
+            event.target.dataset.selected = event.target.value;
+        }
+    });
+});
+
+
+document.addEventListener('DOMContentLoaded', function () {
+    let toggles = document.querySelectorAll('.fcnp-template-enabled');
+    if (!toggles.length) { return; }
+
+    toggles.forEach(function (toggle) {
+        let update = function () {
+            let card = toggle.closest('.fct-form-template-card');
+            if (!card) { return; }
+            let body = card.querySelector('.fct-form-template-body');
+            if (!body) { return; }
+            body.hidden = !toggle.checked;
+            card.classList.toggle('is-enabled', toggle.checked);
+        };
+
+        toggle.addEventListener('change', update);
+        update();
+    });
+});
+
+document.addEventListener('DOMContentLoaded', function () {
+    let container = document.getElementById('fcnp-slack-destinations');
+    let addButton = document.getElementById('fcnp-add-slack-destination');
+    let defaultSelect = document.getElementById('fcnp-slack-default-destination');
+    if (!container || !addButton) { return; }
+
+    let refreshDefaultOptions = function () {
+        if (!defaultSelect) { return; }
+        let selected = defaultSelect.value;
+        defaultSelect.innerHTML = '';
+        container.querySelectorAll('.fct-slack-destination').forEach(function (card) {
+            let id = card.dataset.id;
+            let nameInput = card.querySelector('.fcnp-slack-destination-name');
+            let option = document.createElement('option');
             option.value = id;
-            option.textContent = nameInput.value || id;
-            defaultSlackDestinationSelect.appendChild(option);
+            option.textContent = nameInput && nameInput.value ? nameInput.value : id;
+            option.selected = id === selected;
+            defaultSelect.appendChild(option);
         });
-        if (Array.from(defaultSlackDestinationSelect.options).some(function (option) { return option.value === current; })) {
-            defaultSlackDestinationSelect.value = current;
-        }
-    }
+    };
 
-    if (addSlackDestinationButton && slackDestinationsContainer) {
-        addSlackDestinationButton.addEventListener('click', function () {
-            const id = slugify('slack-' + Date.now());
-            const card = document.createElement('div');
-            card.className = 'formcourier-destination-card formcourier-slack-destination-card';
-            card.dataset.destinationId = id;
-            card.innerHTML = '<div class="formcourier-destination-card__header"><strong>New Slack Destination</strong><button type="button" class="button-link-delete formcourier-remove-slack-destination">Remove</button></div>' +
-                '<div class="formcourier-grid formcourier-grid--2">' +
-                '<label><span>Name</span><input type="text" class="regular-text formcourier-slack-destination-name" name="formcourier_notifications_pro_settings[slack_destinations][' + id + '][name]" value="New Slack Destination"></label>' +
-                '<label><span>Incoming Webhook URL</span><input type="password" class="regular-text" name="formcourier_notifications_pro_settings[slack_destinations][' + id + '][webhook_url]" value="" autocomplete="new-password" placeholder="https://hooks.slack.com/services/..."></label>' +
-                '</div>' +
-                '<label class="formcourier-checkbox"><input type="checkbox" class="formcourier-slack-destination-enabled" name="formcourier_notifications_pro_settings[slack_destinations][' + id + '][enabled]" value="1" checked> Enabled</label>';
-            slackDestinationsContainer.appendChild(card);
-            updateDefaultSlackDestinationOptions();
-        });
+    addButton.addEventListener('click', function () {
+        let id = 'slack-destination-' + Date.now();
+        let prefix = 'formcourier_notifications_pro_settings[slack_destinations][' + id + ']';
+        let card = document.createElement('div');
+        card.className = 'fct-destination fct-slack-destination';
+        card.dataset.id = id;
+        card.innerHTML = '<div class="fct-card-heading"><h3>New Destination</h3><button type="button" class="button-link-delete fcnp-remove-slack-destination">Remove</button></div>' +
+            '<div class="fct-destination-grid">' +
+            '<p><label>Name<br><input class="regular-text fcnp-slack-destination-name" type="text" name="' + prefix + '[name]" value="New Destination"></label></p>' +
+            '<p><label>Incoming Webhook URL<br><input class="regular-text" type="password" autocomplete="new-password" name="' + prefix + '[webhook_url]" value=""></label></p>' +
+            '<p><label><input type="checkbox" name="' + prefix + '[enabled]" value="1" checked> Enabled</label></p>' +
+            '</div>';
+        container.appendChild(card);
+        refreshDefaultOptions();
+    });
 
-        slackDestinationsContainer.addEventListener('click', function (event) {
-            const button = event.target.closest('.formcourier-remove-slack-destination');
-            if (!button) {
-                return;
-            }
-            const card = button.closest('.formcourier-slack-destination-card');
-            if (card) {
-                card.remove();
-                updateDefaultSlackDestinationOptions();
-            }
-        });
+    container.addEventListener('click', function (event) {
+        if (!event.target.classList.contains('fcnp-remove-slack-destination')) { return; }
+        let cards = container.querySelectorAll('.fct-slack-destination');
+        if (cards.length <= 1) { return; }
+        event.target.closest('.fct-slack-destination').remove();
+        refreshDefaultOptions();
+    });
 
-        slackDestinationsContainer.addEventListener('input', function (event) {
-            if (event.target.matches('.formcourier-slack-destination-name')) {
-                const card = event.target.closest('.formcourier-slack-destination-card');
-                const strong = card ? card.querySelector('.formcourier-destination-card__header strong') : null;
-                if (strong) {
-                    strong.textContent = event.target.value || 'Slack Destination';
-                }
-                updateDefaultSlackDestinationOptions();
-            }
-        });
-
-        slackDestinationsContainer.addEventListener('change', function (event) {
-            if (event.target.matches('.formcourier-slack-destination-enabled')) {
-                updateDefaultSlackDestinationOptions();
-            }
-        });
-    }
-
-    const rulesContainer = document.getElementById('formcourier-conditional-rules');
-    const addRuleButton = document.getElementById('formcourier-add-rule');
-    const ruleTemplate = document.getElementById('formcourier-rule-template');
-
-    if (addRuleButton && rulesContainer && ruleTemplate) {
-        addRuleButton.addEventListener('click', function () {
-            const index = 'new_' + Date.now();
-            let html = ruleTemplate.innerHTML.replace(/__INDEX__/g, index);
-            const wrapper = document.createElement('div');
-            wrapper.innerHTML = html.trim();
-            if (wrapper.firstElementChild) {
-                rulesContainer.appendChild(wrapper.firstElementChild);
-            }
-        });
-
-        rulesContainer.addEventListener('click', function (event) {
-            const button = event.target.closest('.formcourier-remove-rule');
-            if (!button) {
-                return;
-            }
-            const row = button.closest('.formcourier-rule-row');
-            if (row) {
-                row.remove();
-            }
-        });
-
-        rulesContainer.addEventListener('change', function (event) {
-            const formSelect = event.target.closest('.formcourier-rule-form');
-            if (!formSelect) {
-                return;
-            }
-            const row = formSelect.closest('.formcourier-rule-row');
-            const fieldSelect = row ? row.querySelector('.formcourier-rule-field') : null;
-            if (!fieldSelect) {
-                return;
-            }
-            fieldSelect.innerHTML = '<option value="">Select field</option>';
-            let fields = {};
-            try {
-                fields = JSON.parse(formSelect.options[formSelect.selectedIndex].dataset.fields || '{}');
-            } catch (e) {
-                fields = {};
-            }
-            Object.keys(fields).forEach(function (key) {
-                const option = document.createElement('option');
-                option.value = key;
-                option.textContent = fields[key] + ' (' + key + ')';
-                fieldSelect.appendChild(option);
-            });
-        });
-    }
-
-    const templateForms = document.querySelectorAll('.formcourier-template-form-select');
-    templateForms.forEach(function (select) {
-        select.addEventListener('change', function () {
-            const target = document.querySelector(select.dataset.target || '');
-            if (!target) {
-                return;
-            }
-            document.querySelectorAll('.formcourier-form-template-panel').forEach(function (panel) {
-                panel.hidden = true;
-            });
-            const panel = document.getElementById('formcourier-template-' + select.value.replace(/[^a-zA-Z0-9_-]/g, '-'));
-            if (panel) {
-                panel.hidden = false;
-            }
-        });
+    container.addEventListener('input', function (event) {
+        if (!event.target.classList.contains('fcnp-slack-destination-name')) { return; }
+        let card = event.target.closest('.fct-slack-destination');
+        let heading = card ? card.querySelector('h3') : null;
+        if (heading) { heading.textContent = event.target.value || card.dataset.id; }
+        refreshDefaultOptions();
     });
 });
