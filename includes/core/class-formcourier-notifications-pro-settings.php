@@ -27,6 +27,7 @@ final class FormCourier_Notifications_Pro_Settings {
             'message_template'          => "🆕 <b>New form submission</b>\n\n<b>Form:</b> {form_name}\n\n{all_fields}",
             'form_message_templates'    => [],
             'delete_data_on_uninstall' => '0',
+            'auto_cleanup_logs_30_days' => '0',
         ];
     }
 
@@ -38,6 +39,7 @@ final class FormCourier_Notifications_Pro_Settings {
         add_action( 'admin_post_formcourier_notifications_pro_slack_test', [ $this, 'handle_slack_test' ] );
         add_action( 'admin_post_formcourier_notifications_pro_clear_logs', [ $this, 'handle_clear_logs' ] );
         add_action( 'admin_post_formcourier_notifications_pro_retry_log', [ $this, 'handle_retry_log' ] );
+        add_action( 'admin_post_formcourier_notifications_pro_export_logs', [ $this, 'handle_export_logs' ] );
         add_filter( 'plugin_action_links_' . FORMCOURIER_NOTIFICATIONS_PRO_BASENAME, [ $this, 'action_links' ] );
     }
 
@@ -466,6 +468,10 @@ final class FormCourier_Notifications_Pro_Settings {
 
         if ( isset( $input['_section'] ) && 'telegram' === $input['_section'] ) {
             $clean['delete_data_on_uninstall'] = ! empty( $input['delete_data_on_uninstall'] ) ? '1' : '0';
+        }
+
+        if ( isset( $input['_section'] ) && 'logs' === $input['_section'] ) {
+            $clean['auto_cleanup_logs_30_days'] = ! empty( $input['auto_cleanup_logs_30_days'] ) ? '1' : '0';
         }
 
         unset( $clean['_section'] );
@@ -1005,12 +1011,103 @@ final class FormCourier_Notifications_Pro_Settings {
     }
 
     private function render_logs_tab(): void {
-        $logs = FormCourier_Notifications_Pro_Logger::all();
+        $all_logs = FormCourier_Notifications_Pro_Logger::all();
+
+        $channel_filter     = isset( $_GET['log_channel'] ) ? sanitize_key( wp_unslash( $_GET['log_channel'] ) ) : '';
+        $provider_filter    = isset( $_GET['log_provider'] ) ? sanitize_text_field( wp_unslash( $_GET['log_provider'] ) ) : '';
+        $status_filter      = isset( $_GET['log_status'] ) ? sanitize_key( wp_unslash( $_GET['log_status'] ) ) : '';
+        $destination_filter = isset( $_GET['log_destination'] ) ? sanitize_text_field( wp_unslash( $_GET['log_destination'] ) ) : '';
+        $search_filter      = isset( $_GET['log_search'] ) ? sanitize_text_field( wp_unslash( $_GET['log_search'] ) ) : '';
+        $date_from_filter   = isset( $_GET['log_date_from'] ) ? sanitize_text_field( wp_unslash( $_GET['log_date_from'] ) ) : '';
+        $date_to_filter     = isset( $_GET['log_date_to'] ) ? sanitize_text_field( wp_unslash( $_GET['log_date_to'] ) ) : '';
+        $per_page            = isset( $_GET['log_per_page'] ) ? absint( $_GET['log_per_page'] ) : 20;
+        $current_page        = isset( $_GET['log_paged'] ) ? max( 1, absint( $_GET['log_paged'] ) ) : 1;
+        if ( ! in_array( $per_page, [ 20, 50, 100 ], true ) ) { $per_page = 20; }
+        if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date_from_filter ) ) { $date_from_filter = ''; }
+        if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date_to_filter ) ) { $date_to_filter = ''; }
+
+        $channels     = [];
+        $providers    = [];
+        $destinations = [];
+        foreach ( $all_logs as $log ) {
+            if ( ! is_array( $log ) ) { continue; }
+            $channel_id = sanitize_key( (string) ( $log['channel_id'] ?? '' ) );
+            $channel_label = sanitize_text_field( (string) ( $log['channel'] ?? ucfirst( $channel_id ) ) );
+            if ( '' !== $channel_id ) { $channels[ $channel_id ] = $channel_label; }
+
+            $provider = sanitize_text_field( (string) ( $log['provider'] ?? '' ) );
+            if ( '' !== $provider ) { $providers[ $provider ] = $provider; }
+
+            $destination = sanitize_text_field( (string) ( $log['destination'] ?? ( $log['destination_id'] ?? '' ) ) );
+            if ( '' !== $destination ) { $destinations[ $destination ] = $destination; }
+        }
+        natcasesort( $providers );
+        natcasesort( $destinations );
+
+        $logs = array_values(
+            array_filter(
+                $all_logs,
+                static function ( $log ) use ( $channel_filter, $provider_filter, $status_filter, $destination_filter, $search_filter, $date_from_filter, $date_to_filter ): bool {
+                    if ( ! is_array( $log ) ) { return false; }
+                    if ( '' !== $channel_filter && $channel_filter !== sanitize_key( (string) ( $log['channel_id'] ?? '' ) ) ) { return false; }
+                    if ( '' !== $provider_filter && $provider_filter !== (string) ( $log['provider'] ?? '' ) ) { return false; }
+                    if ( '' !== $status_filter && $status_filter !== sanitize_key( (string) ( $log['status'] ?? '' ) ) ) { return false; }
+                    $destination = (string) ( $log['destination'] ?? ( $log['destination_id'] ?? '' ) );
+                    if ( '' !== $destination_filter && $destination_filter !== $destination ) { return false; }
+
+                    $log_time = (string) ( $log['time'] ?? '' );
+                    $log_date = substr( $log_time, 0, 10 );
+                    if ( '' !== $date_from_filter && ( '' === $log_date || $log_date < $date_from_filter ) ) { return false; }
+                    if ( '' !== $date_to_filter && ( '' === $log_date || $log_date > $date_to_filter ) ) { return false; }
+
+                    if ( '' !== $search_filter ) {
+                        $haystack = implode( ' ', [
+                            (string) ( $log['channel'] ?? '' ),
+                            (string) ( $log['provider'] ?? '' ),
+                            (string) ( $log['provider_key'] ?? '' ),
+                            (string) ( $log['form_id'] ?? '' ),
+                            (string) ( $log['form_name'] ?? '' ),
+                            $destination,
+                            (string) ( $log['status'] ?? '' ),
+                            (string) ( $log['message'] ?? '' ),
+                            (string) ( $log['last_error'] ?? '' ),
+                            (string) ( $log['provider_response'] ?? '' ),
+                            (string) ( $log['submission_id'] ?? '' ),
+                        ] );
+                        if ( false === stripos( $haystack, $search_filter ) ) { return false; }
+                    }
+                    return true;
+                }
+            )
+        );
+
+        $filtered_count = count( $logs );
+        $log_stats = [
+            'success'  => 0,
+            'error'    => 0,
+            'telegram' => 0,
+            'slack'    => 0,
+        ];
+        foreach ( $logs as $log ) {
+            if ( ! is_array( $log ) ) { continue; }
+            $log_status  = sanitize_key( (string) ( $log['status'] ?? '' ) );
+            $log_channel = sanitize_key( (string) ( $log['channel_id'] ?? '' ) );
+            if ( isset( $log_stats[ $log_status ] ) ) { $log_stats[ $log_status ]++; }
+            if ( isset( $log_stats[ $log_channel ] ) ) { $log_stats[ $log_channel ]++; }
+        }
+        $total_pages    = max( 1, (int) ceil( $filtered_count / $per_page ) );
+        if ( $current_page > $total_pages ) { $current_page = $total_pages; }
+        $page_offset = ( $current_page - 1 ) * $per_page;
+        $paged_logs  = array_slice( $logs, $page_offset, $per_page );
+        $showing_from = $filtered_count > 0 ? $page_offset + 1 : 0;
+        $showing_to   = $filtered_count > 0 ? min( $page_offset + count( $paged_logs ), $filtered_count ) : 0;
+
+        $filters_active = '' !== $channel_filter || '' !== $provider_filter || '' !== $status_filter || '' !== $destination_filter || '' !== $search_filter || '' !== $date_from_filter || '' !== $date_to_filter;
         ?>
         <div class="fct-card">
             <div class="fct-card-heading">
                 <div><h2><?php esc_html_e( 'Recent logs', 'formcourier-notifications-pro' ); ?></h2><p><?php esc_html_e( 'The latest 100 notification delivery attempts are stored locally.', 'formcourier-notifications-pro' ); ?></p></div>
-                <?php if ( ! empty( $logs ) ) : ?>
+                <?php if ( ! empty( $all_logs ) ) : ?>
                     <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
                         <input type="hidden" name="action" value="formcourier_notifications_pro_clear_logs">
                         <?php wp_nonce_field( 'formcourier_notifications_pro_clear_logs' ); ?>
@@ -1018,15 +1115,100 @@ final class FormCourier_Notifications_Pro_Settings {
                     </form>
                 <?php endif; ?>
             </div>
-            <?php if ( empty( $logs ) ) : ?>
+            <form method="post" action="options.php" style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 16px;">
+                <?php settings_fields( 'formcourier_notifications_pro_group' ); ?>
+                <input type="hidden" name="<?php echo esc_attr( self::OPTION ); ?>[_section]" value="logs">
+                <label style="display:flex;align-items:center;gap:7px;">
+                    <input type="checkbox" name="<?php echo esc_attr( self::OPTION ); ?>[auto_cleanup_logs_30_days]" value="1" <?php checked( (string) $this->get( 'auto_cleanup_logs_30_days', '0' ), '1' ); ?>>
+                    <strong><?php esc_html_e( 'Automatically delete logs older than 30 days', 'formcourier-notifications-pro' ); ?></strong>
+                </label>
+                <?php submit_button( __( 'Save', 'formcourier-notifications-pro' ), 'secondary', 'submit', false ); ?>
+                <span style="color:#646970;"><?php esc_html_e( 'Cleanup runs automatically with WP-Cron. Disable this option to keep logs until they are removed manually.', 'formcourier-notifications-pro' ); ?></span>
+            </form>
+            <?php if ( empty( $all_logs ) ) : ?>
                 <div class="fct-empty"><span class="dashicons dashicons-list-view"></span><p><?php esc_html_e( 'No logs yet.', 'formcourier-notifications-pro' ); ?></p></div>
             <?php else : ?>
+                <div class="fcnp-log-summary" aria-label="<?php esc_attr_e( 'Log summary', 'formcourier-notifications-pro' ); ?>">
+                    <div class="fcnp-log-summary-card"><span><?php esc_html_e( 'Filtered', 'formcourier-notifications-pro' ); ?></span><strong><?php echo esc_html( (string) $filtered_count ); ?></strong></div>
+                    <div class="fcnp-log-summary-card is-success"><span><?php esc_html_e( 'Success', 'formcourier-notifications-pro' ); ?></span><strong><?php echo esc_html( (string) $log_stats['success'] ); ?></strong></div>
+                    <div class="fcnp-log-summary-card is-error"><span><?php esc_html_e( 'Errors', 'formcourier-notifications-pro' ); ?></span><strong><?php echo esc_html( (string) $log_stats['error'] ); ?></strong></div>
+                    <div class="fcnp-log-summary-card"><span><?php esc_html_e( 'Telegram', 'formcourier-notifications-pro' ); ?></span><strong><?php echo esc_html( (string) $log_stats['telegram'] ); ?></strong></div>
+                    <div class="fcnp-log-summary-card"><span><?php esc_html_e( 'Slack', 'formcourier-notifications-pro' ); ?></span><strong><?php echo esc_html( (string) $log_stats['slack'] ); ?></strong></div>
+                </div>
+                <form method="get" class="fcnp-log-filters">
+                    <input type="hidden" name="page" value="formcourier-notifications-pro">
+                    <input type="hidden" name="tab" value="logs">
+                    <input type="hidden" name="log_paged" value="1">
+                    <label><?php esc_html_e( 'Search', 'formcourier-notifications-pro' ); ?><br>
+                        <input type="search" name="log_search" value="<?php echo esc_attr( $search_filter ); ?>" placeholder="<?php esc_attr_e( 'Form, destination, error...', 'formcourier-notifications-pro' ); ?>">
+                    </label>
+                    <label><?php esc_html_e( 'Date from', 'formcourier-notifications-pro' ); ?><br>
+                        <input type="date" name="log_date_from" value="<?php echo esc_attr( $date_from_filter ); ?>">
+                    </label>
+                    <label><?php esc_html_e( 'Date to', 'formcourier-notifications-pro' ); ?><br>
+                        <input type="date" name="log_date_to" value="<?php echo esc_attr( $date_to_filter ); ?>">
+                    </label>
+                    <label><?php esc_html_e( 'Channel', 'formcourier-notifications-pro' ); ?><br>
+                        <select name="log_channel">
+                            <option value=""><?php esc_html_e( 'All channels', 'formcourier-notifications-pro' ); ?></option>
+                            <?php foreach ( $channels as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( $channel_filter, $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label><?php esc_html_e( 'Provider', 'formcourier-notifications-pro' ); ?><br>
+                        <select name="log_provider">
+                            <option value=""><?php esc_html_e( 'All providers', 'formcourier-notifications-pro' ); ?></option>
+                            <?php foreach ( $providers as $value ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( $provider_filter, $value ); ?>><?php echo esc_html( $value ); ?></option><?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label><?php esc_html_e( 'Status', 'formcourier-notifications-pro' ); ?><br>
+                        <select name="log_status">
+                            <option value=""><?php esc_html_e( 'All statuses', 'formcourier-notifications-pro' ); ?></option>
+                            <option value="success" <?php selected( $status_filter, 'success' ); ?>><?php esc_html_e( 'Success', 'formcourier-notifications-pro' ); ?></option>
+                            <option value="error" <?php selected( $status_filter, 'error' ); ?>><?php esc_html_e( 'Error', 'formcourier-notifications-pro' ); ?></option>
+                        </select>
+                    </label>
+                    <label><?php esc_html_e( 'Destination', 'formcourier-notifications-pro' ); ?><br>
+                        <select name="log_destination">
+                            <option value=""><?php esc_html_e( 'All destinations', 'formcourier-notifications-pro' ); ?></option>
+                            <?php foreach ( $destinations as $value ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( $destination_filter, $value ); ?>><?php echo esc_html( $value ); ?></option><?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label><?php esc_html_e( 'Per page', 'formcourier-notifications-pro' ); ?><br>
+                        <select name="log_per_page">
+                            <?php foreach ( [ 20, 50, 100 ] as $size ) : ?><option value="<?php echo esc_attr( (string) $size ); ?>" <?php selected( $per_page, $size ); ?>><?php echo esc_html( (string) $size ); ?></option><?php endforeach; ?>
+                        </select>
+                    </label>
+                    <?php submit_button( __( 'Filter', 'formcourier-notifications-pro' ), 'secondary', 'submit', false ); ?>
+                    <?php if ( $filters_active ) : ?><a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs' ) ); ?>"><?php esc_html_e( 'Reset', 'formcourier-notifications-pro' ); ?></a><?php endif; ?>
+                    <span class="fcnp-log-filter-count"><?php echo esc_html( sprintf( __( 'Showing %1$d–%2$d of %3$d filtered (%4$d total)', 'formcourier-notifications-pro' ), $showing_from, $showing_to, $filtered_count, count( $all_logs ) ) ); ?></span>
+                </form>
+                <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="fcnp-log-export">
+                    <input type="hidden" name="action" value="formcourier_notifications_pro_export_logs">
+                    <input type="hidden" name="log_search" value="<?php echo esc_attr( $search_filter ); ?>">
+                    <input type="hidden" name="log_date_from" value="<?php echo esc_attr( $date_from_filter ); ?>">
+                    <input type="hidden" name="log_date_to" value="<?php echo esc_attr( $date_to_filter ); ?>">
+                    <input type="hidden" name="log_channel" value="<?php echo esc_attr( $channel_filter ); ?>">
+                    <input type="hidden" name="log_provider" value="<?php echo esc_attr( $provider_filter ); ?>">
+                    <input type="hidden" name="log_status" value="<?php echo esc_attr( $status_filter ); ?>">
+                    <input type="hidden" name="log_destination" value="<?php echo esc_attr( $destination_filter ); ?>">
+                    <?php wp_nonce_field( 'formcourier_notifications_pro_export_logs' ); ?>
+                    <?php if ( empty( $logs ) ) : ?>
+                        <?php submit_button( __( 'Export CSV', 'formcourier-notifications-pro' ), 'secondary', 'submit', false, [ 'disabled' => 'disabled' ] ); ?>
+                    <?php else : ?>
+                        <?php submit_button( __( 'Export CSV', 'formcourier-notifications-pro' ), 'secondary', 'submit', false ); ?>
+                    <?php endif; ?>
+                    <span class="fcnp-log-export-note"><?php esc_html_e( 'Exports the currently filtered log entries.', 'formcourier-notifications-pro' ); ?></span>
+                </form>
+
+                <?php if ( empty( $logs ) ) : ?>
+                    <div class="fct-empty"><span class="dashicons dashicons-filter"></span><p><?php esc_html_e( 'No log entries match the selected filters.', 'formcourier-notifications-pro' ); ?></p></div>
+                <?php else : ?>
                 <div class="fct-table-wrap">
                     <table class="widefat striped fct-logs-table">
                         <thead><tr><th><?php esc_html_e( 'Date', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Channel', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Provider', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Form', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Destination', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Status', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Attempts', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Details', 'formcourier-notifications-pro' ); ?></th><th><?php esc_html_e( 'Actions', 'formcourier-notifications-pro' ); ?></th></tr></thead>
                         <tbody>
-                        <?php foreach ( $logs as $log ) : ?>
-                            <tr>
+                        <?php foreach ( $paged_logs as $log ) : ?>
+                            <tr data-log-id="<?php echo esc_attr( (string) ( $log['id'] ?? '' ) ); ?>">
                                 <td class="fct-nowrap"><?php echo esc_html( $log['time'] ?? '' ); ?></td>
                                 <td><?php echo esc_html( $log['channel'] ?? 'Telegram' ); ?></td>
                                 <td><?php echo esc_html( $log['provider'] ?? '' ); ?></td>
@@ -1059,6 +1241,42 @@ final class FormCourier_Notifications_Pro_Settings {
                         </tbody>
                     </table>
                 </div>
+                <?php if ( $total_pages > 1 ) : ?>
+                    <div class="tablenav bottom" style="margin-top:14px;">
+                        <div class="tablenav-pages">
+                            <?php
+                            $pagination_args = [
+                                'page'            => 'formcourier-notifications-pro',
+                                'tab'             => 'logs',
+                                'log_search'      => $search_filter,
+                                'log_date_from'   => $date_from_filter,
+                                'log_date_to'     => $date_to_filter,
+                                'log_channel'     => $channel_filter,
+                                'log_provider'    => $provider_filter,
+                                'log_status'      => $status_filter,
+                                'log_destination' => $destination_filter,
+                                'log_per_page'    => $per_page,
+                            ];
+                            $pagination_args = array_filter( $pagination_args, static fn( $value ) => '' !== (string) $value );
+                            $base_url = add_query_arg( $pagination_args, admin_url( 'admin.php' ) );
+                            echo wp_kses_post(
+                                paginate_links(
+                                    [
+                                        'base'      => add_query_arg( 'log_paged', '%#%', $base_url ),
+                                        'format'    => '',
+                                        'current'   => $current_page,
+                                        'total'     => $total_pages,
+                                        'prev_text' => '&laquo;',
+                                        'next_text' => '&raquo;',
+                                        'type'      => 'list',
+                                    ]
+                                )
+                            );
+                            ?>
+                        </div>
+                    </div>
+                <?php endif; ?>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
         <?php
@@ -1117,6 +1335,84 @@ final class FormCourier_Notifications_Pro_Settings {
         }
 
         wp_safe_redirect( admin_url( 'admin.php?page=formcourier-notifications-pro&tab=logs&fct_notice=' . ( 'success' === $status ? 'retry_success' : 'retry_error' ) ) );
+        exit;
+    }
+
+    public function handle_export_logs(): void {
+        if ( ! current_user_can( 'manage_options' ) ) { wp_die( esc_html__( 'Access denied.', 'formcourier-notifications-pro' ) ); }
+        check_admin_referer( 'formcourier_notifications_pro_export_logs' );
+
+        $channel_filter     = isset( $_POST['log_channel'] ) ? sanitize_key( wp_unslash( $_POST['log_channel'] ) ) : '';
+        $provider_filter    = isset( $_POST['log_provider'] ) ? sanitize_text_field( wp_unslash( $_POST['log_provider'] ) ) : '';
+        $status_filter      = isset( $_POST['log_status'] ) ? sanitize_key( wp_unslash( $_POST['log_status'] ) ) : '';
+        $destination_filter = isset( $_POST['log_destination'] ) ? sanitize_text_field( wp_unslash( $_POST['log_destination'] ) ) : '';
+        $search_filter      = isset( $_POST['log_search'] ) ? sanitize_text_field( wp_unslash( $_POST['log_search'] ) ) : '';
+        $date_from_filter   = isset( $_POST['log_date_from'] ) ? sanitize_text_field( wp_unslash( $_POST['log_date_from'] ) ) : '';
+        $date_to_filter     = isset( $_POST['log_date_to'] ) ? sanitize_text_field( wp_unslash( $_POST['log_date_to'] ) ) : '';
+        if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date_from_filter ) ) { $date_from_filter = ''; }
+        if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date_to_filter ) ) { $date_to_filter = ''; }
+
+        $logs = array_values(
+            array_filter(
+                FormCourier_Notifications_Pro_Logger::all(),
+                static function ( $log ) use ( $channel_filter, $provider_filter, $status_filter, $destination_filter, $search_filter, $date_from_filter, $date_to_filter ): bool {
+                    if ( ! is_array( $log ) ) { return false; }
+                    if ( '' !== $channel_filter && $channel_filter !== sanitize_key( (string) ( $log['channel_id'] ?? '' ) ) ) { return false; }
+                    if ( '' !== $provider_filter && $provider_filter !== (string) ( $log['provider'] ?? '' ) ) { return false; }
+                    if ( '' !== $status_filter && $status_filter !== sanitize_key( (string) ( $log['status'] ?? '' ) ) ) { return false; }
+                    $destination = (string) ( $log['destination'] ?? ( $log['destination_id'] ?? '' ) );
+                    if ( '' !== $destination_filter && $destination_filter !== $destination ) { return false; }
+                    $log_date = substr( (string) ( $log['time'] ?? '' ), 0, 10 );
+                    if ( '' !== $date_from_filter && ( '' === $log_date || $log_date < $date_from_filter ) ) { return false; }
+                    if ( '' !== $date_to_filter && ( '' === $log_date || $log_date > $date_to_filter ) ) { return false; }
+                    if ( '' !== $search_filter ) {
+                        $haystack = implode( ' ', [
+                            (string) ( $log['channel'] ?? '' ), (string) ( $log['provider'] ?? '' ),
+                            (string) ( $log['provider_key'] ?? '' ), (string) ( $log['form_id'] ?? '' ),
+                            (string) ( $log['form_name'] ?? '' ), $destination, (string) ( $log['status'] ?? '' ),
+                            (string) ( $log['message'] ?? '' ), (string) ( $log['last_error'] ?? '' ),
+                            (string) ( $log['provider_response'] ?? '' ), (string) ( $log['submission_id'] ?? '' ),
+                        ] );
+                        if ( false === stripos( $haystack, $search_filter ) ) { return false; }
+                    }
+                    return true;
+                }
+            )
+        );
+
+        $filename = 'formcourier-logs-' . wp_date( 'Y-m-d-His', time(), wp_timezone() ) . '.csv';
+        nocache_headers();
+        header( 'Content-Type: text/csv; charset=UTF-8' );
+        header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+        header( 'X-Content-Type-Options: nosniff' );
+
+        $output = fopen( 'php://output', 'w' );
+        if ( false === $output ) { exit; }
+        fwrite( $output, "\xEF\xBB\xBF" );
+        fputcsv( $output, [ 'Date', 'Channel', 'Provider', 'Form ID', 'Form', 'Destination', 'Status', 'Attempts', 'Message', 'HTTP Status', 'Last Error', 'Provider Response', 'Retryable', 'Retry After', 'Retry State', 'Next Retry', 'Submission ID', 'Submitted At' ] );
+        foreach ( $logs as $log ) {
+            fputcsv( $output, [
+                (string) ( $log['time'] ?? '' ),
+                (string) ( $log['channel'] ?? '' ),
+                (string) ( $log['provider'] ?? '' ),
+                (string) ( $log['form_id'] ?? '' ),
+                (string) ( $log['form_name'] ?? '' ),
+                (string) ( $log['destination'] ?? ( $log['destination_id'] ?? '' ) ),
+                (string) ( $log['status'] ?? '' ),
+                (string) max( 1, absint( $log['attempts'] ?? 1 ) ),
+                (string) ( $log['message'] ?? '' ),
+                (string) absint( $log['http_status'] ?? 0 ),
+                (string) ( $log['last_error'] ?? '' ),
+                (string) ( $log['provider_response'] ?? '' ),
+                ! empty( $log['retryable'] ) ? 'Yes' : 'No',
+                (string) absint( $log['retry_after'] ?? 0 ),
+                (string) ( $log['auto_retry_state'] ?? '' ),
+                (string) ( $log['next_retry_at'] ?? '' ),
+                (string) ( $log['submission_id'] ?? '' ),
+                (string) ( $log['submitted_at'] ?? '' ),
+            ] );
+        }
+        fclose( $output );
         exit;
     }
 

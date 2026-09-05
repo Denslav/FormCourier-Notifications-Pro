@@ -23,17 +23,21 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
 
         if ( '' === $webhook_url ) {
             return [
-                'status'    => 'error',
-                'message'   => 'Slack Incoming Webhook URL is empty for the selected destination.',
-                'retryable' => false,
+                'status'            => 'error',
+                'message'           => 'Slack Incoming Webhook URL is empty for the selected destination.',
+                'http_status'       => 0,
+                'provider_response' => 'Local configuration error.',
+                'retryable'         => false,
             ];
         }
 
         if ( 0 !== strpos( $webhook_url, 'https://' ) ) {
             return [
-                'status'    => 'error',
-                'message'   => 'Slack Incoming Webhook URL must use HTTPS.',
-                'retryable' => false,
+                'status'            => 'error',
+                'message'           => 'Slack Incoming Webhook URL must use HTTPS.',
+                'http_status'       => 0,
+                'provider_response' => 'Local configuration error.',
+                'retryable'         => false,
             ];
         }
 
@@ -47,8 +51,6 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
             ]
         );
 
-        // Message templates are shared with Telegram. Convert the safe HTML
-        // representation to readable plain text before sending it to Slack.
         $message = wp_strip_all_tags( $message );
         $message = html_entity_decode( $message, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
         $message = trim( preg_replace( "/\r\n?|\r/", "\n", (string) $message ) );
@@ -89,18 +91,28 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
         );
 
         if ( is_wp_error( $response ) ) {
+            $network_error = sanitize_text_field( $response->get_error_message() );
             return [
-                'status'    => 'error',
-                'message'   => 'Slack network error: ' . sanitize_text_field( $response->get_error_message() ),
-                'retryable' => true,
+                'status'            => 'error',
+                'message'           => 'Slack network error: ' . $network_error,
+                'http_status'       => 0,
+                'provider_response' => $network_error,
+                'retryable'         => true,
             ];
         }
 
         $code = (int) wp_remote_retrieve_response_code( $response );
         $body = trim( (string) wp_remote_retrieve_body( $response ) );
+        $safe_body = sanitize_text_field( $body );
 
         if ( $code >= 200 && $code < 300 && 'ok' === strtolower( $body ) ) {
-            return [ 'status' => 'success', 'message' => 'Slack message sent successfully.' ];
+            return [
+                'status'            => 'success',
+                'message'           => 'Slack message sent successfully.',
+                'http_status'       => $code,
+                'provider_response' => 'ok',
+                'retryable'         => false,
+            ];
         }
 
         $retry_after = absint( wp_remote_retrieve_header( $response, 'retry-after' ) );
@@ -120,19 +132,21 @@ final class FormCourier_Notifications_Pro_Slack_Provider implements FormCourier_
             $friendly = 'Slack webhook error' . ( $code ? ' ' . $code : '' ) . '.';
         }
 
-        if ( '' !== $body && 'ok' !== strtolower( $body ) ) {
-            $friendly .= ' ' . sanitize_text_field( $body );
+        if ( '' !== $safe_body && 'ok' !== strtolower( $safe_body ) ) {
+            $friendly .= ' ' . $safe_body;
         }
         if ( $retry_after > 0 ) {
             $friendly .= ' Retry after ' . $retry_after . ' seconds.';
         }
 
         return [
-            'status'      => 'error',
-            'message'     => $friendly,
-            'error_code'  => $code,
-            'retryable'   => $retryable,
-            'retry_after' => $retry_after,
+            'status'            => 'error',
+            'message'           => $friendly,
+            'http_status'       => $code,
+            'error_code'        => $code,
+            'provider_response' => $safe_body,
+            'retryable'         => $retryable,
+            'retry_after'       => $retry_after,
         ];
     }
 }

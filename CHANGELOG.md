@@ -2,6 +2,26 @@
 
 All notable changes to **FormCourier Notifications Pro** are documented in this file.
 
+## [1.8.0] - 2026-09-05
+
+### Added
+- Expandable Delivery details for notification logs.
+- HTTP status, provider response, last error, retry state, next retry time, submission ID, and submitted-at diagnostics.
+- Log filters for notification channel, form provider, delivery status, and destination.
+- Text search and Date from / Date to filtering.
+- CSV export for the complete currently filtered log selection.
+- Log summary counters for filtered entries, successes, errors, Telegram, and Slack deliveries.
+- Pagination with 20, 50, or 100 entries per page.
+- Optional automatic deletion of logs older than 30 days using daily WP-Cron cleanup.
+
+### Changed
+- Retry diagnostics are refreshed after manual and automatic retries.
+- Logs layout, counters, filter controls, and pagination footer were improved for clearer administration.
+
+### Compatibility
+- Existing Telegram and Slack settings, routing, templates, logs, manual Retry, and automatic Retry remain fully supported.
+- Contact Form 7, WPForms, Fluent Forms, Forminator, Ninja Forms, and Gravity Forms remain supported.
+
 ## [1.7.0] - 2026-09-05
 
 ### Added
@@ -26,85 +46,70 @@ All notable changes to **FormCourier Notifications Pro** are documented in this 
 
 ### Added
 - Automatic retry queue for temporary Telegram delivery failures.
-- WP-Cron based retry scheduling.
 - Retry delays of 1 minute, 5 minutes, and 15 minutes.
-- Telegram `429` handling with support for `retry_after`.
-- Manual Retry remains available after automatic retries are exhausted.
+- Retry support for network errors, Telegram rate limits, and Telegram 5xx errors.
 
 ### Changed
-- Permanent configuration errors such as an empty Bot Token or Chat ID are not automatically retried.
-- Retry processing is performed only when a queued event is due.
+- Logs show the next scheduled automatic retry and retain manual Retry.
+- Telegram `retry_after` values are respected when longer than the default delay.
 
-## [1.5.0] - 2026-09-04
-
-### Added
-- Destination column in delivery logs.
-- Attempts counter.
-- Manual Retry action for failed deliveries.
-- System placeholders: `{destination}`, `{provider}`, `{submitted_at}`, `{form_name}`, `{form_id}`.
-- Separate log entry for every destination.
-
-## [1.4.4] - 2026-09-01
+## [1.5.0]
 
 ### Added
-- Human-readable form field labels in default Telegram messages.
+- Destination and Attempts columns to delivery logs.
+- Manual Retry for failed Telegram deliveries.
+- `{destination}`, `{provider}`, and `{submitted_at}` message placeholders.
 
-## [1.4.3] - 2026-09-01
+## [1.4.4]
+
+### Changed
+- Default Telegram messages use discovered human-readable field labels where available.
+- Fluent Forms compound Name fields use readable labels.
+- Contact Form 7 field-type suffixes are removed from Telegram message labels.
+
+## [1.4.3]
 
 ### Fixed
-- Removed duplicate combined `names` output from Fluent Forms default messages while retaining `{field:names}` as a compatibility alias.
+- Duplicate combined Name output in Fluent Forms default messages while preserving the legacy `{field:names}` alias.
 
-## [1.4.2] - 2026-09-01
-
-### Fixed
-- Removed duplicate WPForms field aliases from the Message UI.
-- Removed duplicate Ninja Forms field aliases from the Message UI.
-- Hidden non-user fields and submit controls are no longer shown as message placeholders.
-
-## [1.4.1] - 2026-09-01
-
-### Fixed
-- Fluent Forms field discovery.
-- Nested Fluent Forms name fields such as `names[first_name]` and `names[last_name]`.
-- Placeholder normalization for compound Fluent Forms fields.
-
-## [1.4.0] - 2026-09-01
+## [1.4.2]
 
 ### Added
-- Default message template.
-- Per-form custom message templates.
-- Real form field placeholders in the Message UI.
+- Per-form Telegram message templates.
+- Default template fallback for forms without an override.
+- Discovered field placeholders for each form.
 
-## [1.3.1] - 2026-09-01
+## [1.3.1]
 
 ### Added
-- Dynamic field selection for Conditional Routing.
-- Automatic field discovery for supported form builders.
-- Fallback field discovery from real submissions.
+- Automatic field discovery for Conditional Routing.
+- Field discovery for all six supported form builders.
 
-## [1.3.0] - 2026-09-01
+## [1.3.0]
 
 ### Added
 - Automatic form discovery.
-- Conditional Routing.
-- Conditional operators such as equals, contains, greater than, less than, empty, and not empty.
-- `Replace form destinations` and `Add destinations` actions.
+- Conditional routing by form field values.
+- Replace and Add routing modes.
 
-## [1.2.0] - 2026-08-31
+## [1.2.0]
 
 ### Added
-- Multiple destinations per form.
-- Separate Telegram delivery for every selected destination.
-- Separate logging per destination.
+- Multi-destination routing per form.
 
-## [1.1.0] - 2026-08-27
+## [1.1.0]
 
 ### Added
 - Multiple Telegram destinations.
-- Default destination.
+- Default Telegram destination.
 - Per-form destination routing.
-- Destination-specific connection tests.
+- Destination-aware test messages and logs.
 
-## [1.0.0] - 2026-08-27
+## [1.0.0]
 
-
+### Added
+- Initial Pro architecture.
+- Universal Submission core.
+- Routing Engine and provider interface.
+- Telegram as the first notification provider.
+- Integrations with six WordPress form plugins.

@@ -58,21 +58,27 @@ final class FormCourier_Notifications_Pro_Notification_Manager {
                 : $this->settings->get_destination( $destination_id );
             $destination_name = (string) ( $destination['name'] ?? $destination_id );
 
-            $status = (string) ( $result['status'] ?? 'error' );
+            $status  = (string) ( $result['status'] ?? 'error' );
+            $message = (string) ( $result['message'] ?? '' );
             $log_entry = [
-                'channel'        => $provider->get_name(),
-                'channel_id'     => $provider->get_id(),
-                'destination'    => $destination_name,
-                'destination_id' => $destination_id,
-                'provider'       => $submission->provider_label,
-                'provider_key'   => $submission->provider_key,
-                'form_id'        => $submission->form_id,
-                'form_name'      => $submission->form_name,
-                'status'         => $status,
-                'message'        => $result['message'] ?? '',
-                'submission_id'  => $submission->submission_id,
-                'submitted_at'   => $submission->submitted_at,
-                'attempts'       => 1,
+                'channel'           => $provider->get_name(),
+                'channel_id'        => $provider->get_id(),
+                'destination'       => $destination_name,
+                'destination_id'    => $destination_id,
+                'provider'          => $submission->provider_label,
+                'provider_key'      => $submission->provider_key,
+                'form_id'           => $submission->form_id,
+                'form_name'         => $submission->form_name,
+                'status'            => $status,
+                'message'           => $message,
+                'http_status'       => absint( $result['http_status'] ?? $result['error_code'] ?? 0 ),
+                'last_error'        => 'success' === $status ? '' : $message,
+                'provider_response' => sanitize_text_field( (string) ( $result['provider_response'] ?? '' ) ),
+                'retryable'         => ! empty( $result['retryable'] ),
+                'retry_after'       => absint( $result['retry_after'] ?? 0 ),
+                'submission_id'     => $submission->submission_id,
+                'submitted_at'      => $submission->submitted_at,
+                'attempts'          => 1,
             ];
 
             // Store the minimum submission payload only for failed deliveries so

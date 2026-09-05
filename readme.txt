@@ -4,7 +4,7 @@ Tags: forms, telegram, slack, notifications, wpforms
 Requires at least: 6.0
 Requires PHP: 7.4
 Tested up to: 6.8
-Stable tag: 1.7.0
+Stable tag: 1.8.0
 License: GPLv2 or later
 
 FormCourier Notifications Pro routes WordPress form submissions to notification providers.
@@ -34,6 +34,17 @@ The internal architecture separates submission normalization, routing, notificat
 5. Send test submissions and review Logs.
 
 == Changelog ==
+
+= 1.8.0 =
+* Added expandable Delivery details with HTTP status, provider response, last error, retry state, next retry time, submission ID and submission timestamp.
+* Added log filtering by notification channel, form provider, delivery status and destination.
+* Added text search and Date from / Date to filtering for delivery logs.
+* Added CSV export for the complete currently filtered log selection.
+* Added log summary counters for filtered entries, successes, errors, Telegram and Slack deliveries.
+* Added pagination with 20, 50 or 100 entries per page.
+* Added optional automatic deletion of logs older than 30 days using daily WP-Cron cleanup.
+* Improved retry diagnostics so delivery details are refreshed after manual and automatic retries.
+* Improved the Logs layout and pagination footer for clearer administration.
 
 = 1.7.0 =
 * Added Slack as a notification provider using Incoming Webhooks.

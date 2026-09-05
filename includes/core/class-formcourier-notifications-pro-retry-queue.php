@@ -37,7 +37,6 @@ final class FormCourier_Notifications_Pro_Retry_Queue {
             return false;
         }
 
-        // Telegram may explicitly request a longer pause after a 429 response.
         $provider_retry_after = absint( $result['retry_after'] ?? 0 );
         if ( $provider_retry_after > $delay ) {
             $delay = $provider_retry_after;
@@ -93,7 +92,6 @@ final class FormCourier_Notifications_Pro_Retry_Queue {
             ];
         }
 
-        // A manual retry supersedes any waiting automatic retry for this same delivery.
         if ( ! $automatic ) {
             wp_clear_scheduled_hook( self::HOOK, [ $log_id ] );
         }
@@ -123,16 +121,22 @@ final class FormCourier_Notifications_Pro_Retry_Queue {
         }
         $result = $provider->send( $submission, [ 'destination' => $destination_id ] );
 
-        $status = (string) ( $result['status'] ?? 'error' );
+        $status   = (string) ( $result['status'] ?? 'error' );
+        $message  = (string) ( $result['message'] ?? '' );
         $attempts = max( 1, absint( $log['attempts'] ?? 1 ) ) + 1;
 
         $changes = [
-            'time'             => current_time( 'mysql' ),
-            'status'           => $status,
-            'message'          => (string) ( $result['message'] ?? '' ),
-            'attempts'         => $attempts,
-            'next_retry_at'    => '',
-            'auto_retry_state' => $automatic ? 'processing' : 'manual',
+            'time'              => current_time( 'mysql' ),
+            'status'            => $status,
+            'message'           => $message,
+            'http_status'       => absint( $result['http_status'] ?? $result['error_code'] ?? 0 ),
+            'last_error'        => 'success' === $status ? '' : $message,
+            'provider_response' => sanitize_text_field( (string) ( $result['provider_response'] ?? '' ) ),
+            'retryable'         => ! empty( $result['retryable'] ),
+            'retry_after'       => absint( $result['retry_after'] ?? 0 ),
+            'attempts'          => $attempts,
+            'next_retry_at'     => '',
+            'auto_retry_state'  => $automatic ? 'processing' : 'manual',
         ];
 
         if ( 'success' === $status ) {

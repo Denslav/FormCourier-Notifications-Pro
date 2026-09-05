@@ -1,7 +1,9 @@
 <?php
 if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) { exit; }
 
-// Remove pending automatic retry cron events before deleting logs.
+// Remove pending automatic retry and log-cleanup cron events before deleting logs.
+wp_clear_scheduled_hook( 'formcourier_notifications_pro_cleanup_logs' );
+
 $logs = get_option( 'formcourier_notifications_pro_logs', [] );
 if ( is_array( $logs ) ) {
     foreach ( $logs as $log ) {

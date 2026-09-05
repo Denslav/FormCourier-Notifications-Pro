@@ -24,7 +24,13 @@ final class FormCourier_Notifications_Pro_Telegram_Provider implements FormCouri
         $chat_id = trim( (string) ( $destination['chat_id'] ?? '' ) );
 
         if ( '' === $token || '' === $chat_id ) {
-            return [ 'status' => 'error', 'message' => 'Telegram Bot Token or Chat ID is empty for the selected destination.', 'retryable' => false ];
+            return [
+                'status'            => 'error',
+                'message'           => 'Telegram Bot Token or Chat ID is empty for the selected destination.',
+                'http_status'       => 0,
+                'provider_response' => 'Local configuration error.',
+                'retryable'         => false,
+            ];
         }
 
         $message = FormCourier_Notifications_Pro_Message_Builder::build(
@@ -39,6 +45,7 @@ final class FormCourier_Notifications_Pro_Telegram_Provider implements FormCouri
 
         $parts = FormCourier_Notifications_Pro_Message_Builder::split_for_telegram( $message );
         $total = count( $parts );
+        $last_result = [];
 
         foreach ( $parts as $index => $part ) {
             if ( $total > 1 ) {
@@ -46,6 +53,7 @@ final class FormCourier_Notifications_Pro_Telegram_Provider implements FormCouri
             }
 
             $result = $this->request( $token, $chat_id, $part );
+            $last_result = $result;
             if ( 'success' !== ( $result['status'] ?? 'error' ) ) {
                 if ( $total > 1 ) {
                     $result['message'] = 'Part ' . ( $index + 1 ) . ' of ' . $total . ' failed. ' . ( $result['message'] ?? '' );
@@ -54,15 +62,14 @@ final class FormCourier_Notifications_Pro_Telegram_Provider implements FormCouri
             }
         }
 
-        if ( $total > 1 ) {
-            return [
-                'status'  => 'success',
-                'message' => 'Telegram message sent successfully in ' . $total . ' parts.',
-                'parts'   => $total,
-            ];
-        }
-
-        return [ 'status' => 'success', 'message' => 'Telegram message sent successfully.', 'parts' => 1 ];
+        return [
+            'status'            => 'success',
+            'message'           => $total > 1 ? 'Telegram message sent successfully in ' . $total . ' parts.' : 'Telegram message sent successfully.',
+            'parts'             => max( 1, $total ),
+            'http_status'       => absint( $last_result['http_status'] ?? 200 ),
+            'provider_response' => (string) ( $last_result['provider_response'] ?? 'ok' ),
+            'retryable'         => false,
+        ];
     }
 
     public function send_test( string $destination_id = '' ): array {
@@ -101,14 +108,27 @@ final class FormCourier_Notifications_Pro_Telegram_Provider implements FormCouri
         );
 
         if ( is_wp_error( $response ) ) {
-            return [ 'status' => 'error', 'message' => 'Network error: ' . sanitize_text_field( $response->get_error_message() ), 'retryable' => true ];
+            $network_error = sanitize_text_field( $response->get_error_message() );
+            return [
+                'status'            => 'error',
+                'message'           => 'Network error: ' . $network_error,
+                'http_status'       => 0,
+                'provider_response' => $network_error,
+                'retryable'         => true,
+            ];
         }
 
         $code = (int) wp_remote_retrieve_response_code( $response );
         $body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
 
         if ( $code >= 200 && $code < 300 && is_array( $body ) && ! empty( $body['ok'] ) ) {
-            return [ 'status' => 'success', 'message' => 'Telegram message sent successfully.' ];
+            return [
+                'status'            => 'success',
+                'message'           => 'Telegram message sent successfully.',
+                'http_status'       => $code,
+                'provider_response' => 'ok',
+                'retryable'         => false,
+            ];
         }
 
         $description = is_array( $body ) && ! empty( $body['description'] )
@@ -118,19 +138,21 @@ final class FormCourier_Notifications_Pro_Telegram_Provider implements FormCouri
         $error_code = is_array( $body ) && ! empty( $body['error_code'] ) ? absint( $body['error_code'] ) : $code;
         $retry_after = is_array( $body ) && ! empty( $body['parameters']['retry_after'] ) ? absint( $body['parameters']['retry_after'] ) : 0;
 
-        $message = $this->friendly_error( $error_code, $description );
+        $friendly = $this->friendly_error( $error_code, $description );
         if ( $retry_after > 0 ) {
-            $message .= ' Retry after ' . $retry_after . ' seconds.';
+            $friendly .= ' Retry after ' . $retry_after . ' seconds.';
         }
 
         $retryable = ( 429 === $error_code || $error_code >= 500 );
 
         return [
-            'status'      => 'error',
-            'message'     => $message,
-            'error_code'  => $error_code,
-            'retryable'   => $retryable,
-            'retry_after' => $retry_after,
+            'status'            => 'error',
+            'message'           => $friendly,
+            'http_status'       => $code,
+            'error_code'        => $error_code,
+            'provider_response' => $description,
+            'retryable'         => $retryable,
+            'retry_after'       => $retry_after,
         ];
     }
 
