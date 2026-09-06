@@ -4,7 +4,7 @@ Tags: forms, telegram, slack, notifications, wpforms
 Requires at least: 6.0
 Requires PHP: 7.4
 Tested up to: 6.8
-Stable tag: 1.8.0
+Stable tag: 1.9.0
 License: GPLv2 or later
 
 FormCourier Notifications Pro routes WordPress form submissions to notification providers.
@@ -30,10 +30,19 @@ The internal architecture separates submission normalization, routing, notificat
 1. Upload and activate FormCourier Notifications Pro.
 2. Configure Telegram and/or Slack destinations.
 3. Open Forms and choose Telegram and Slack destinations for each form.
-4. Optionally add Conditional Routing rules.
+4. Optionally add Advanced Routing rules when you need conditional multi-destination routing.
 5. Send test submissions and review Logs.
 
 == Changelog ==
+
+= 1.9.0 =
+* Added optional Advanced Routing with multiple conditions per rule.
+* Added ALL (AND) and ANY (OR) condition matching.
+* Added Telegram and Slack destinations to the same advanced rule.
+* Added Add destinations and Replace form destinations actions.
+* Added optional Priority and Stop processing controls for overlapping rules.
+* Added automatic fallback to normal Form Routes/default destinations when no advanced rule matches.
+* Existing 1.8.0 single-condition rules remain compatible.
 
 = 1.8.0 =
 * Added expandable Delivery details with HTTP status, provider response, last error, retry state, next retry time, submission ID and submission timestamp.

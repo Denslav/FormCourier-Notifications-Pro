@@ -183,19 +183,75 @@ final class FormCourier_Notifications_Pro_Settings {
         if ( ! is_array( $rules ) || empty( $rules ) ) { return []; }
 
         $route_key = sanitize_key( $submission->provider_key ) . ':' . sanitize_key( (string) $submission->form_id );
-        $matched = [];
-        foreach ( $rules as $rule ) {
+        $candidates = [];
+        foreach ( $rules as $order => $rule ) {
             if ( ! is_array( $rule ) || '1' !== ( $rule['enabled'] ?? '1' ) ) { continue; }
             if ( $route_key !== (string) ( $rule['form_key'] ?? '' ) ) { continue; }
-            if ( $this->conditional_rule_matches( $rule, $submission ) ) { $matched[] = $rule; }
+            $candidates[] = [
+                'rule'     => $rule,
+                'priority' => max( 0, min( 999, absint( $rule['priority'] ?? 0 ) ) ),
+                'order'    => (int) $order,
+            ];
         }
-        return $matched;
+
+        // Higher priority rules are evaluated first. Equal priorities keep their saved order.
+        usort(
+            $candidates,
+            static function ( array $a, array $b ): int {
+                if ( $a['priority'] === $b['priority'] ) { return $a['order'] <=> $b['order']; }
+                return $b['priority'] <=> $a['priority'];
+            }
+        );
+
+        $matched = [];
+        foreach ( $candidates as $candidate ) {
+            $rule = $candidate['rule'];
+            if ( ! $this->conditional_rule_matches( $rule, $submission ) ) { continue; }
+            $matched[] = $candidate;
+            if ( '1' === (string) ( $rule['stop_processing'] ?? '0' ) ) { break; }
+        }
+
+        // Apply lower priorities first so a higher-priority Replace action wins when rules overlap.
+        usort(
+            $matched,
+            static function ( array $a, array $b ): int {
+                if ( $a['priority'] === $b['priority'] ) { return $a['order'] <=> $b['order']; }
+                return $a['priority'] <=> $b['priority'];
+            }
+        );
+
+        return array_values( array_map( static fn( array $item ): array => $item['rule'], $matched ) );
     }
 
     private function conditional_rule_matches( array $rule, FormCourier_Notifications_Pro_Submission $submission ): bool {
-        $field = trim( (string) ( $rule['field'] ?? '' ) );
-        $operator = sanitize_key( (string) ( $rule['operator'] ?? 'equals' ) );
-        $expected = (string) ( $rule['value'] ?? '' );
+        $conditions = isset( $rule['conditions'] ) && is_array( $rule['conditions'] ) ? $rule['conditions'] : [];
+
+        // Backward compatibility with 1.8.0 and earlier single-condition rules.
+        if ( empty( $conditions ) && '' !== trim( (string) ( $rule['field'] ?? '' ) ) ) {
+            $conditions[] = [
+                'field'    => (string) ( $rule['field'] ?? '' ),
+                'operator' => (string) ( $rule['operator'] ?? 'equals' ),
+                'value'    => (string) ( $rule['value'] ?? '' ),
+            ];
+        }
+
+        if ( empty( $conditions ) ) { return false; }
+
+        $match_mode = 'any' === sanitize_key( (string) ( $rule['match_mode'] ?? 'all' ) ) ? 'any' : 'all';
+        $results = [];
+        foreach ( $conditions as $condition ) {
+            if ( ! is_array( $condition ) || '' === trim( (string) ( $condition['field'] ?? '' ) ) ) { continue; }
+            $results[] = $this->conditional_condition_matches( $condition, $submission );
+        }
+
+        if ( empty( $results ) ) { return false; }
+        return 'any' === $match_mode ? in_array( true, $results, true ) : ! in_array( false, $results, true );
+    }
+
+    private function conditional_condition_matches( array $condition, FormCourier_Notifications_Pro_Submission $submission ): bool {
+        $field = trim( (string) ( $condition['field'] ?? '' ) );
+        $operator = sanitize_key( (string) ( $condition['operator'] ?? 'equals' ) );
+        $expected = (string) ( $condition['value'] ?? '' );
         $actual = '';
 
         if ( '' !== $field ) {
@@ -414,24 +470,64 @@ final class FormCourier_Notifications_Pro_Settings {
                 foreach ( $input['conditional_rules'] as $rule ) {
                     if ( ! is_array( $rule ) ) { continue; }
                     $form_key = sanitize_text_field( (string) ( $rule['form_key'] ?? '' ) );
-                    $field = sanitize_text_field( (string) ( $rule['field'] ?? '' ) );
-                    $operator = sanitize_key( (string) ( $rule['operator'] ?? 'equals' ) );
-                    if ( ! in_array( $operator, $allowed_operators, true ) ) { $operator = 'equals'; }
+                    $match_mode = 'any' === sanitize_key( (string) ( $rule['match_mode'] ?? 'all' ) ) ? 'any' : 'all';
                     $mode = 'add' === sanitize_key( (string) ( $rule['mode'] ?? 'replace' ) ) ? 'add' : 'replace';
+                    $priority = max( 0, min( 999, absint( $rule['priority'] ?? 0 ) ) );
+                    $stop_processing = ! empty( $rule['stop_processing'] ) ? '1' : '0';
+
+                    $raw_conditions = isset( $rule['conditions'] ) && is_array( $rule['conditions'] ) ? $rule['conditions'] : [];
+                    // Preserve rules posted by older admin UIs or stored by 1.8.0.
+                    if ( empty( $raw_conditions ) && isset( $rule['field'] ) ) {
+                        $raw_conditions[] = [
+                            'field'    => $rule['field'] ?? '',
+                            'operator' => $rule['operator'] ?? 'equals',
+                            'value'    => $rule['value'] ?? '',
+                        ];
+                    }
+
+                    $conditions = [];
+                    foreach ( $raw_conditions as $condition ) {
+                        if ( ! is_array( $condition ) ) { continue; }
+                        $field = sanitize_text_field( (string) ( $condition['field'] ?? '' ) );
+                        $operator = sanitize_key( (string) ( $condition['operator'] ?? 'equals' ) );
+                        if ( ! in_array( $operator, $allowed_operators, true ) ) { $operator = 'equals'; }
+                        if ( '' === $field ) { continue; }
+                        $conditions[] = [
+                            'field'    => $field,
+                            'operator' => $operator,
+                            'value'    => sanitize_text_field( (string) ( $condition['value'] ?? '' ) ),
+                        ];
+                    }
+
                     $selected = [];
                     foreach ( (array) ( $rule['destinations'] ?? [] ) as $destination_id ) {
                         $destination_id = sanitize_key( (string) $destination_id );
                         if ( isset( $destinations[ $destination_id ] ) && ! in_array( $destination_id, $selected, true ) ) { $selected[] = $destination_id; }
                     }
-                    if ( '' === $form_key || '' === $field || empty( $selected ) ) { continue; }
+
+                    $selected_slack = [];
+                    foreach ( (array) ( $rule['slack_destinations'] ?? [] ) as $destination_id ) {
+                        $destination_id = sanitize_key( (string) $destination_id );
+                        if ( isset( $slack_destinations[ $destination_id ] ) && ! in_array( $destination_id, $selected_slack, true ) ) { $selected_slack[] = $destination_id; }
+                    }
+
+                    if ( '' === $form_key || empty( $conditions ) || ( empty( $selected ) && empty( $selected_slack ) ) ) { continue; }
+
+                    $first_condition = $conditions[0];
                     $rules[] = [
-                        'enabled'      => ! empty( $rule['enabled'] ) ? '1' : '0',
-                        'form_key'     => $form_key,
-                        'field'        => $field,
-                        'operator'     => $operator,
-                        'value'        => sanitize_text_field( (string) ( $rule['value'] ?? '' ) ),
-                        'mode'         => $mode,
-                        'destinations' => $selected,
+                        'enabled'            => ! empty( $rule['enabled'] ) ? '1' : '0',
+                        'form_key'           => $form_key,
+                        'match_mode'         => $match_mode,
+                        'priority'           => $priority,
+                        'stop_processing'    => $stop_processing,
+                        'conditions'         => $conditions,
+                        // Legacy mirror keeps older code and downgrade scenarios usable.
+                        'field'              => $first_condition['field'],
+                        'operator'           => $first_condition['operator'],
+                        'value'              => $first_condition['value'],
+                        'mode'               => $mode,
+                        'destinations'       => $selected,
+                        'slack_destinations' => $selected_slack,
                     ];
                 }
             }
@@ -856,22 +952,32 @@ final class FormCourier_Notifications_Pro_Settings {
                         </tbody>
                     </table>
                 <?php endif; ?>
-                <?php if ( ! empty( $known_forms ) && ! empty( $destinations ) ) : ?>
+                <?php if ( ! empty( $known_forms ) && ( ! empty( $destinations ) || ! empty( $slack_destinations ) ) ) : ?>
                     <hr>
-                    <div class="fct-card-heading fct-rules-heading">
-                        <div>
-                            <h2><?php esc_html_e( 'Telegram conditional routing', 'formcourier-notifications-pro' ); ?></h2>
-                            <p><?php esc_html_e( 'Send a submission to different destinations when a field matches a condition.', 'formcourier-notifications-pro' ); ?></p>
+                    <?php $has_advanced_rules = ! empty( $settings['conditional_rules'] ); ?>
+                    <details class="fcnp-advanced-routing" <?php echo $has_advanced_rules ? 'open' : ''; ?>>
+                        <summary>
+                            <strong><?php esc_html_e( 'Advanced Routing (Optional)', 'formcourier-notifications-pro' ); ?></strong>
+                            <span><?php esc_html_e( 'Use multiple conditions only when you need them.', 'formcourier-notifications-pro' ); ?></span>
+                        </summary>
+                        <div class="fcnp-advanced-routing-body">
+                            <div class="fct-card-heading fct-rules-heading">
+                                <div>
+                                    <h2><?php esc_html_e( 'Advanced routing', 'formcourier-notifications-pro' ); ?></h2>
+                                    <p><?php esc_html_e( 'Leave this section empty to keep normal form routing and default destinations. Advanced rules are never required for sending messages.', 'formcourier-notifications-pro' ); ?></p>
+                                    <p class="description"><strong><?php esc_html_e( 'Automatic fallback:', 'formcourier-notifications-pro' ); ?></strong> <?php esc_html_e( 'If no Advanced Routing rule matches a submission, the normal Form Routes and default destinations are used automatically.', 'formcourier-notifications-pro' ); ?></p>
+                                </div>
+                                <button type="button" class="button" id="fcnp-add-rule"><?php esc_html_e( 'Add Rule', 'formcourier-notifications-pro' ); ?></button>
+                            </div>
+                            <div id="fcnp-rules">
+                                <?php foreach ( (array) ( $settings['conditional_rules'] ?? [] ) as $index => $rule ) : ?>
+                                    <?php $this->render_rule_row( (int) $index, $rule, $known_forms, $destinations, $slack_destinations ); ?>
+                                <?php endforeach; ?>
+                            </div>
+                            <template id="fcnp-rule-template"><?php $this->render_rule_row( '__INDEX__', [], $known_forms, $destinations, $slack_destinations ); ?></template>
+                            <p class="description"><?php esc_html_e( 'ALL means every condition must match. ANY means at least one condition must match. Higher priority rules are evaluated first; when Replace actions overlap, the higher priority rule takes precedence. Stop processing skips lower-priority rules after a match. A matching rule can route Telegram, Slack, or both. If no rule matches, normal Form Routes and default destinations are used automatically. Existing 1.8.0 single-condition rules remain compatible.', 'formcourier-notifications-pro' ); ?></p>
                         </div>
-                        <button type="button" class="button" id="fcnp-add-rule"><?php esc_html_e( 'Add Rule', 'formcourier-notifications-pro' ); ?></button>
-                    </div>
-                    <div id="fcnp-rules">
-                        <?php foreach ( (array) ( $settings['conditional_rules'] ?? [] ) as $index => $rule ) : ?>
-                            <?php $this->render_rule_row( (int) $index, $rule, $known_forms, $destinations ); ?>
-                        <?php endforeach; ?>
-                    </div>
-                    <template id="fcnp-rule-template"><?php $this->render_rule_row( '__INDEX__', [], $known_forms, $destinations ); ?></template>
-                    <p class="description"><?php esc_html_e( 'Fields are loaded automatically from the selected form. If a saved field is no longer discoverable, it remains available as a custom value.', 'formcourier-notifications-pro' ); ?></p>
+                    </details>
                 <?php endif; ?>
                 <?php submit_button( __( 'Save Form Settings', 'formcourier-notifications-pro' ) ); ?>
             </form>
@@ -879,43 +985,82 @@ final class FormCourier_Notifications_Pro_Settings {
         <?php
     }
 
-    /** @param int|string $index @param array<string,mixed> $rule @param array<string,array<string,mixed>> $forms @param array<string,array<string,mixed>> $destinations */
-    private function render_rule_row( $index, array $rule, array $forms, array $destinations ): void {
+    /** @param int|string $index @param array<string,mixed> $rule @param array<string,array<string,mixed>> $forms @param array<string,array<string,mixed>> $destinations @param array<string,array<string,mixed>> $slack_destinations */
+    private function render_rule_row( $index, array $rule, array $forms, array $destinations, array $slack_destinations ): void {
         $prefix = self::OPTION . '[conditional_rules][' . $index . ']';
-        $operator = (string) ( $rule['operator'] ?? 'equals' );
         $mode = (string) ( $rule['mode'] ?? 'replace' );
+        $match_mode = 'any' === (string) ( $rule['match_mode'] ?? 'all' ) ? 'any' : 'all';
+        $priority = max( 0, min( 999, absint( $rule['priority'] ?? 0 ) ) );
+        $stop_processing = '1' === (string) ( $rule['stop_processing'] ?? '0' );
         $selected_destinations = array_map( 'sanitize_key', (array) ( $rule['destinations'] ?? [] ) );
+        $selected_slack_destinations = array_map( 'sanitize_key', (array) ( $rule['slack_destinations'] ?? [] ) );
+        $selected_form_key = (string) ( $rule['form_key'] ?? '' );
+        if ( '' === $selected_form_key && ! empty( $forms ) ) { $selected_form_key = (string) array_key_first( $forms ); }
+        $conditions = isset( $rule['conditions'] ) && is_array( $rule['conditions'] ) ? $rule['conditions'] : [];
+        if ( empty( $conditions ) && '' !== trim( (string) ( $rule['field'] ?? '' ) ) ) {
+            $conditions[] = [ 'field' => $rule['field'], 'operator' => $rule['operator'] ?? 'equals', 'value' => $rule['value'] ?? '' ];
+        }
+        if ( empty( $conditions ) ) { $conditions[] = []; }
         ?>
-        <div class="fct-rule-row">
+        <div class="fct-rule-row" data-rule-index="<?php echo esc_attr( (string) $index ); ?>">
             <div class="fct-rule-top">
                 <label><input type="checkbox" name="<?php echo esc_attr( $prefix ); ?>[enabled]" value="1" <?php checked( $rule['enabled'] ?? '1', '1' ); ?>> <?php esc_html_e( 'Enabled', 'formcourier-notifications-pro' ); ?></label>
-                <button type="button" class="button-link-delete fcnp-remove-rule"><?php esc_html_e( 'Remove', 'formcourier-notifications-pro' ); ?></button>
+                <button type="button" class="button-link-delete fcnp-remove-rule"><?php esc_html_e( 'Remove rule', 'formcourier-notifications-pro' ); ?></button>
             </div>
-            <div class="fct-rule-grid">
-                <?php
-                $selected_form_key = (string) ( $rule['form_key'] ?? '' );
-                if ( '' === $selected_form_key && ! empty( $forms ) ) { $selected_form_key = (string) array_key_first( $forms ); }
-                $all_form_fields = FormCourier_Notifications_Pro_Form_Discovery::fields();
-                $available_fields = isset( $all_form_fields[ $selected_form_key ] ) && is_array( $all_form_fields[ $selected_form_key ] ) ? $all_form_fields[ $selected_form_key ] : [];
-                $selected_field = sanitize_text_field( (string) ( $rule['field'] ?? '' ) );
-                ?>
+            <div class="fct-rule-meta-grid">
                 <label><?php esc_html_e( 'Form', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-form" name="<?php echo esc_attr( $prefix ); ?>[form_key]">
                     <?php foreach ( $forms as $form_key => $form ) : ?><option value="<?php echo esc_attr( $form_key ); ?>" <?php selected( $selected_form_key, $form_key ); ?>><?php echo esc_html( ( $form['provider_label'] ?? '' ) . ' - ' . ( $form['form_name'] ?? '' ) . ' (#' . ( $form['form_id'] ?? '' ) . ')' ); ?></option><?php endforeach; ?>
                 </select></label>
-                <label><?php esc_html_e( 'Field', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-field" name="<?php echo esc_attr( $prefix ); ?>[field]" data-selected="<?php echo esc_attr( $selected_field ); ?>">
-                    <option value=""><?php esc_html_e( 'Select a field', 'formcourier-notifications-pro' ); ?></option>
-                    <?php foreach ( $available_fields as $field_key => $field_label ) : ?><option value="<?php echo esc_attr( $field_key ); ?>" <?php selected( $selected_field, $field_key ); ?>><?php echo esc_html( $field_label . ' (' . $field_key . ')' ); ?></option><?php endforeach; ?>
-                    <?php if ( '' !== $selected_field && ! isset( $available_fields[ $selected_field ] ) ) : ?><option value="<?php echo esc_attr( $selected_field ); ?>" selected><?php echo esc_html( $selected_field . ' - ' . __( 'Custom / previously saved field', 'formcourier-notifications-pro' ) ); ?></option><?php endif; ?>
+                <label><?php esc_html_e( 'Match', 'formcourier-notifications-pro' ); ?><select name="<?php echo esc_attr( $prefix ); ?>[match_mode]">
+                    <option value="all" <?php selected( $match_mode, 'all' ); ?>><?php esc_html_e( 'ALL conditions (AND)', 'formcourier-notifications-pro' ); ?></option>
+                    <option value="any" <?php selected( $match_mode, 'any' ); ?>><?php esc_html_e( 'ANY condition (OR)', 'formcourier-notifications-pro' ); ?></option>
                 </select></label>
-                <label><?php esc_html_e( 'Operator', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-operator" name="<?php echo esc_attr( $prefix ); ?>[operator]">
-                    <?php foreach ( [ 'equals' => 'Equals', 'not_equals' => 'Does not equal', 'contains' => 'Contains', 'not_contains' => 'Does not contain', 'greater_than' => 'Greater than', 'less_than' => 'Less than', 'is_empty' => 'Is empty', 'is_not_empty' => 'Is not empty' ] as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( $operator, $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?>
-                </select></label>
-                <label class="fcnp-rule-value-wrap"><?php esc_html_e( 'Value', 'formcourier-notifications-pro' ); ?><input type="text" name="<?php echo esc_attr( $prefix ); ?>[value]" value="<?php echo esc_attr( $rule['value'] ?? '' ); ?>"></label>
                 <label><?php esc_html_e( 'Action', 'formcourier-notifications-pro' ); ?><select name="<?php echo esc_attr( $prefix ); ?>[mode]"><option value="replace" <?php selected( $mode, 'replace' ); ?>><?php esc_html_e( 'Replace form destinations', 'formcourier-notifications-pro' ); ?></option><option value="add" <?php selected( $mode, 'add' ); ?>><?php esc_html_e( 'Add destinations', 'formcourier-notifications-pro' ); ?></option></select></label>
             </div>
-            <div class="fct-rule-destinations"><strong><?php esc_html_e( 'Destinations', 'formcourier-notifications-pro' ); ?></strong><div class="fct-route-destinations">
-                <?php foreach ( $destinations as $destination_id => $destination ) : ?><label class="fct-route-option"><input type="checkbox" name="<?php echo esc_attr( $prefix ); ?>[destinations][]" value="<?php echo esc_attr( $destination_id ); ?>" <?php checked( in_array( $destination_id, $selected_destinations, true ) ); ?>><span><?php echo esc_html( $destination['name'] ?? $destination_id ); ?></span></label><?php endforeach; ?>
-            </div></div>
+            <div class="fcnp-rule-flow-controls">
+                <label class="fcnp-rule-priority"><?php esc_html_e( 'Priority', 'formcourier-notifications-pro' ); ?><input type="number" min="0" max="999" step="1" name="<?php echo esc_attr( $prefix ); ?>[priority]" value="<?php echo esc_attr( (string) $priority ); ?>"><span><?php esc_html_e( 'Higher numbers run first.', 'formcourier-notifications-pro' ); ?></span></label>
+                <label class="fcnp-stop-processing"><input type="checkbox" name="<?php echo esc_attr( $prefix ); ?>[stop_processing]" value="1" <?php checked( $stop_processing ); ?>><span><strong><?php esc_html_e( 'Stop processing lower-priority rules', 'formcourier-notifications-pro' ); ?></strong><small><?php esc_html_e( 'When this rule matches, lower-priority Advanced Routing rules are skipped.', 'formcourier-notifications-pro' ); ?></small></span></label>
+            </div>
+            <div class="fcnp-rule-conditions">
+                <div class="fcnp-rule-conditions-head"><strong><?php esc_html_e( 'Conditions', 'formcourier-notifications-pro' ); ?></strong><button type="button" class="button button-small fcnp-add-condition"><?php esc_html_e( 'Add Condition', 'formcourier-notifications-pro' ); ?></button></div>
+                <div class="fcnp-condition-list">
+                    <?php foreach ( $conditions as $condition_index => $condition ) : $this->render_condition_row( $index, $condition_index, is_array( $condition ) ? $condition : [], $selected_form_key ); endforeach; ?>
+                </div>
+                <template class="fcnp-condition-template"><?php $this->render_condition_row( $index, '__COND__', [], $selected_form_key ); ?></template>
+            </div>
+            <?php if ( ! empty( $destinations ) ) : ?>
+                <div class="fct-rule-destinations"><strong><?php esc_html_e( 'Telegram destinations', 'formcourier-notifications-pro' ); ?></strong><div class="fct-route-destinations">
+                    <?php foreach ( $destinations as $destination_id => $destination ) : ?><label class="fct-route-option"><input type="checkbox" name="<?php echo esc_attr( $prefix ); ?>[destinations][]" value="<?php echo esc_attr( $destination_id ); ?>" <?php checked( in_array( $destination_id, $selected_destinations, true ) ); ?>><span><?php echo esc_html( $destination['name'] ?? $destination_id ); ?></span></label><?php endforeach; ?>
+                </div></div>
+            <?php endif; ?>
+            <?php if ( ! empty( $slack_destinations ) ) : ?>
+                <div class="fct-rule-destinations"><strong><?php esc_html_e( 'Slack destinations', 'formcourier-notifications-pro' ); ?></strong><div class="fct-route-destinations">
+                    <?php foreach ( $slack_destinations as $destination_id => $destination ) : ?><label class="fct-route-option"><input type="checkbox" name="<?php echo esc_attr( $prefix ); ?>[slack_destinations][]" value="<?php echo esc_attr( $destination_id ); ?>" <?php checked( in_array( $destination_id, $selected_slack_destinations, true ) ); ?>><span><?php echo esc_html( $destination['name'] ?? $destination_id ); ?></span></label><?php endforeach; ?>
+                </div></div>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    /** @param int|string $rule_index @param int|string $condition_index @param array<string,mixed> $condition */
+    private function render_condition_row( $rule_index, $condition_index, array $condition, string $selected_form_key ): void {
+        $prefix = self::OPTION . '[conditional_rules][' . $rule_index . '][conditions][' . $condition_index . ']';
+        $operator = (string) ( $condition['operator'] ?? 'equals' );
+        $selected_field = sanitize_text_field( (string) ( $condition['field'] ?? '' ) );
+        $all_form_fields = FormCourier_Notifications_Pro_Form_Discovery::fields();
+        $available_fields = isset( $all_form_fields[ $selected_form_key ] ) && is_array( $all_form_fields[ $selected_form_key ] ) ? $all_form_fields[ $selected_form_key ] : [];
+        ?>
+        <div class="fcnp-condition-row">
+            <label><?php esc_html_e( 'Field', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-field" name="<?php echo esc_attr( $prefix ); ?>[field]" data-selected="<?php echo esc_attr( $selected_field ); ?>">
+                <option value=""><?php esc_html_e( 'Select a field', 'formcourier-notifications-pro' ); ?></option>
+                <?php foreach ( $available_fields as $field_key => $field_label ) : ?><option value="<?php echo esc_attr( $field_key ); ?>" <?php selected( $selected_field, $field_key ); ?>><?php echo esc_html( $field_label . ' (' . $field_key . ')' ); ?></option><?php endforeach; ?>
+                <?php if ( '' !== $selected_field && ! isset( $available_fields[ $selected_field ] ) ) : ?><option value="<?php echo esc_attr( $selected_field ); ?>" selected><?php echo esc_html( $selected_field . ' - ' . __( 'Custom / previously saved field', 'formcourier-notifications-pro' ) ); ?></option><?php endif; ?>
+            </select></label>
+            <label><?php esc_html_e( 'Operator', 'formcourier-notifications-pro' ); ?><select class="fcnp-rule-operator" name="<?php echo esc_attr( $prefix ); ?>[operator]">
+                <?php foreach ( [ 'equals' => 'Equals', 'not_equals' => 'Does not equal', 'contains' => 'Contains', 'not_contains' => 'Does not contain', 'greater_than' => 'Greater than', 'less_than' => 'Less than', 'is_empty' => 'Is empty', 'is_not_empty' => 'Is not empty' ] as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( $operator, $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?>
+            </select></label>
+            <label class="fcnp-rule-value-wrap"><?php esc_html_e( 'Value', 'formcourier-notifications-pro' ); ?><input type="text" name="<?php echo esc_attr( $prefix ); ?>[value]" value="<?php echo esc_attr( $condition['value'] ?? '' ); ?>"></label>
+            <button type="button" class="button-link-delete fcnp-remove-condition"><?php esc_html_e( 'Remove', 'formcourier-notifications-pro' ); ?></button>
         </div>
         <?php
     }

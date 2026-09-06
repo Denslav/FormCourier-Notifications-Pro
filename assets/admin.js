@@ -60,9 +60,9 @@ document.addEventListener('DOMContentLoaded', function () {
     let template = document.getElementById('fcnp-rule-template');
     if (!rules || !addRule || !template) { return; }
 
-    let updateValueVisibility = function (row) {
-        let operator = row.querySelector('.fcnp-rule-operator');
-        let valueWrap = row.querySelector('.fcnp-rule-value-wrap');
+    let updateConditionValueVisibility = function (condition) {
+        let operator = condition.querySelector('.fcnp-rule-operator');
+        let valueWrap = condition.querySelector('.fcnp-rule-value-wrap');
         if (!operator || !valueWrap) { return; }
         let hide = operator.value === 'is_empty' || operator.value === 'is_not_empty';
         valueWrap.style.display = hide ? 'none' : '';
@@ -70,43 +70,44 @@ document.addEventListener('DOMContentLoaded', function () {
 
     let updateFieldOptions = function (row, preserveSelected) {
         let formSelect = row.querySelector('.fcnp-rule-form');
-        let fieldSelect = row.querySelector('.fcnp-rule-field');
-        if (!formSelect || !fieldSelect) { return; }
-
+        if (!formSelect) { return; }
         let data = window.FormCourierNotificationsProAdmin || {};
         let fieldMap = data.formFields || {};
         let fields = fieldMap[formSelect.value] || {};
-        let selected = preserveSelected ? (fieldSelect.value || fieldSelect.dataset.selected || '') : '';
 
-        fieldSelect.innerHTML = '';
-        let empty = document.createElement('option');
-        empty.value = '';
-        empty.textContent = data.fieldPlaceholder || 'Select a field';
-        fieldSelect.appendChild(empty);
-
-        Object.keys(fields).forEach(function (key) {
-            let option = document.createElement('option');
-            option.value = key;
-            option.textContent = fields[key] + ' (' + key + ')';
-            if (key === selected) { option.selected = true; }
-            fieldSelect.appendChild(option);
+        row.querySelectorAll('.fcnp-rule-field').forEach(function (fieldSelect) {
+            let selected = preserveSelected ? (fieldSelect.value || fieldSelect.dataset.selected || '') : '';
+            fieldSelect.innerHTML = '';
+            let empty = document.createElement('option');
+            empty.value = '';
+            empty.textContent = data.fieldPlaceholder || 'Select a field';
+            fieldSelect.appendChild(empty);
+            Object.keys(fields).forEach(function (key) {
+                let option = document.createElement('option');
+                option.value = key;
+                option.textContent = fields[key] + ' (' + key + ')';
+                if (key === selected) { option.selected = true; }
+                fieldSelect.appendChild(option);
+            });
+            if (selected && !Object.prototype.hasOwnProperty.call(fields, selected)) {
+                let custom = document.createElement('option');
+                custom.value = selected;
+                custom.textContent = selected + ' - ' + (data.customFieldLabel || 'Custom / previously saved field');
+                custom.selected = true;
+                fieldSelect.appendChild(custom);
+            }
+            fieldSelect.dataset.selected = fieldSelect.value;
         });
-
-        if (selected && !Object.prototype.hasOwnProperty.call(fields, selected)) {
-            let custom = document.createElement('option');
-            custom.value = selected;
-            custom.textContent = selected + ' - ' + (data.customFieldLabel || 'Custom / previously saved field');
-            custom.selected = true;
-            fieldSelect.appendChild(custom);
-        }
-
-        fieldSelect.dataset.selected = fieldSelect.value;
     };
 
-    rules.querySelectorAll('.fct-rule-row').forEach(function (row) {
-        updateValueVisibility(row);
-        updateFieldOptions(row, true);
-    });
+    let initializeRule = function (row, preserveSelected) {
+        updateFieldOptions(row, preserveSelected);
+        row.querySelectorAll('.fcnp-condition-row').forEach(function (condition) {
+            updateConditionValueVisibility(condition);
+        });
+    };
+
+    rules.querySelectorAll('.fct-rule-row').forEach(function (row) { initializeRule(row, true); });
 
     addRule.addEventListener('click', function () {
         let index = Date.now().toString();
@@ -116,21 +117,52 @@ document.addEventListener('DOMContentLoaded', function () {
         let row = wrapper.firstElementChild;
         if (!row) { return; }
         rules.appendChild(row);
-        updateValueVisibility(row);
-        updateFieldOptions(row, false);
+        initializeRule(row, false);
     });
 
     rules.addEventListener('click', function (event) {
-        if (!event.target.classList.contains('fcnp-remove-rule')) { return; }
-        let row = event.target.closest('.fct-rule-row');
-        if (row) { row.remove(); }
+        if (event.target.classList.contains('fcnp-remove-rule')) {
+            let row = event.target.closest('.fct-rule-row');
+            if (row) { row.remove(); }
+            return;
+        }
+        if (event.target.classList.contains('fcnp-add-condition')) {
+            let row = event.target.closest('.fct-rule-row');
+            if (!row) { return; }
+            let conditionTemplate = row.querySelector('.fcnp-condition-template');
+            let list = row.querySelector('.fcnp-condition-list');
+            if (!conditionTemplate || !list) { return; }
+            let conditionIndex = Date.now().toString();
+            let html = conditionTemplate.innerHTML.replaceAll('__COND__', conditionIndex);
+            let wrapper = document.createElement('div');
+            wrapper.innerHTML = html.trim();
+            let condition = wrapper.firstElementChild;
+            if (!condition) { return; }
+            list.appendChild(condition);
+            updateFieldOptions(row, true);
+            updateConditionValueVisibility(condition);
+            return;
+        }
+        if (event.target.classList.contains('fcnp-remove-condition')) {
+            let row = event.target.closest('.fct-rule-row');
+            let condition = event.target.closest('.fcnp-condition-row');
+            if (!row || !condition) { return; }
+            if (row.querySelectorAll('.fcnp-condition-row').length <= 1) {
+                condition.querySelectorAll('input[type="text"]').forEach(function (input) { input.value = ''; });
+                let field = condition.querySelector('.fcnp-rule-field');
+                if (field) { field.value = ''; field.dataset.selected = ''; }
+            } else {
+                condition.remove();
+            }
+        }
     });
 
     rules.addEventListener('change', function (event) {
         let row = event.target.closest('.fct-rule-row');
         if (!row) { return; }
         if (event.target.classList.contains('fcnp-rule-operator')) {
-            updateValueVisibility(row);
+            let condition = event.target.closest('.fcnp-condition-row');
+            if (condition) { updateConditionValueVisibility(condition); }
         }
         if (event.target.classList.contains('fcnp-rule-form')) {
             updateFieldOptions(row, false);
