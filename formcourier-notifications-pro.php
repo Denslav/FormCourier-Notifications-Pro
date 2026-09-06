@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FormCourier Notifications Pro
  * Description: Route submissions from popular WordPress form plugins to notification channels. Telegram and Slack providers included.
- * Version: 1.8.0
+ * Version: 1.9.0
  * Author: Den Slav
  * License: GPL v2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -13,7 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'FORMCOURIER_NOTIFICATIONS_PRO_VERSION', '1.8.0' );
+define( 'FORMCOURIER_NOTIFICATIONS_PRO_VERSION', '1.9.0' );
 define( 'FORMCOURIER_NOTIFICATIONS_PRO_FILE', __FILE__ );
 define( 'FORMCOURIER_NOTIFICATIONS_PRO_PATH', plugin_dir_path( __FILE__ ) );
 define( 'FORMCOURIER_NOTIFICATIONS_PRO_URL', plugin_dir_url( __FILE__ ) );

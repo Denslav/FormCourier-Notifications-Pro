@@ -2,6 +2,28 @@
 
 All notable changes to **FormCourier Notifications Pro** are documented in this file.
 
+## [1.9.0] - 2026-09-06
+
+### Added
+- Optional Advanced Routing section for complex routing while keeping standard form routing as the default experience.
+- Multiple conditions per rule with ALL (AND) and ANY (OR) matching.
+- Telegram and Slack destinations in the same Advanced Routing rule.
+- Add destinations and Replace form destinations actions.
+- Optional rule Priority from 0 to 999; higher priorities are evaluated first.
+- Optional Stop processing control to skip lower-priority rules after a match.
+- Automatic fallback to normal Form Routes/default destinations when no Advanced Routing rule matches.
+
+### Improved
+- Automatic form-field discovery is reused for each Advanced Routing condition.
+- Overlapping Replace rules resolve deterministically so higher-priority rules take precedence.
+- Advanced Routing stays out of the way unless the user explicitly creates rules.
+
+### Compatibility
+- Updating from 1.8.0 requires no routing reconfiguration.
+- Existing 1.8.0 single-condition Telegram rules remain compatible and are treated as one-condition Advanced Routing rules.
+- Existing Telegram and Slack settings, standard Form Routes, templates, logs, manual Retry, automatic Retry, CSV export, pagination, and 30-day log cleanup remain supported.
+- Contact Form 7, WPForms, Fluent Forms, Forminator, Ninja Forms, and Gravity Forms remain supported.
+
 ## [1.8.0] - 2026-09-05
 
 ### Added

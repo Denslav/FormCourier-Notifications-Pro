@@ -11,11 +11,16 @@ final class FormCourier_Notifications_Pro_Routing_Engine {
     /** @return array<int,array{provider:string,destination:string}> */
     public function resolve( FormCourier_Notifications_Pro_Submission $submission ): array {
         $routes = [];
+        $matching_rules = $this->settings->get_matching_conditional_rules( $submission );
+
+        // Automatic fallback is intentional: each channel starts from its normal
+        // Form Routes/default destinations. Advanced Routing only changes those
+        // destinations when one or more rules actually match the submission.
 
         if ( '1' === $this->settings->get( 'enabled', '0' ) ) {
             $telegram_destination_ids = $this->settings->get_route_destinations( $submission );
 
-            foreach ( $this->settings->get_matching_conditional_rules( $submission ) as $rule ) {
+            foreach ( $matching_rules as $rule ) {
                 $rule_destinations = array_values( array_filter( array_map( 'sanitize_key', (array) ( $rule['destinations'] ?? [] ) ) ) );
                 if ( empty( $rule_destinations ) ) { continue; }
                 if ( 'add' === ( $rule['mode'] ?? 'replace' ) ) {
@@ -34,7 +39,19 @@ final class FormCourier_Notifications_Pro_Routing_Engine {
         }
 
         if ( '1' === $this->settings->get( 'slack_enabled', '0' ) ) {
-            foreach ( $this->settings->get_slack_route_destinations( $submission ) as $destination_id ) {
+            $slack_destination_ids = $this->settings->get_slack_route_destinations( $submission );
+
+            foreach ( $matching_rules as $rule ) {
+                $rule_destinations = array_values( array_filter( array_map( 'sanitize_key', (array) ( $rule['slack_destinations'] ?? [] ) ) ) );
+                if ( empty( $rule_destinations ) ) { continue; }
+                if ( 'add' === ( $rule['mode'] ?? 'replace' ) ) {
+                    $slack_destination_ids = array_values( array_unique( array_merge( $slack_destination_ids, $rule_destinations ) ) );
+                } else {
+                    $slack_destination_ids = $rule_destinations;
+                }
+            }
+
+            foreach ( $slack_destination_ids as $destination_id ) {
                 $routes[] = [
                     'provider'    => 'slack',
                     'destination' => sanitize_key( (string) $destination_id ),
